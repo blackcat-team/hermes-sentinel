@@ -10,7 +10,8 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage B1 (SQLite Persistence Foundation).
+Initial development — Stage B2 (Heartbeat Ingestion Core) on top of
+the Stage B1 SQLite persistence foundation.
 
 - Architecture contracts (product, security, host state semantics,
   persistence, roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)

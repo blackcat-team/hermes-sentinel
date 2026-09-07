@@ -192,3 +192,47 @@ Heartbeat observations are persisted in SQLite via the Python stdlib
 
 Stage B1 does not compute HEALTHY / DEGRADED / DOWN and does not
 decide heartbeat freshness; those belong to stages B/D.
+
+## 11. Heartbeat ingestion core (Stage B2)
+
+Heartbeats reach persistence through a transport-independent
+application operation (`hermes_sentinel.ingestion.HeartbeatIngestor`):
+
+    reporter / future HTTP transport
+                |
+    HeartbeatIngestor
+                |
+    B1 HeartbeatRepository -> SQLite
+
+B2 is deliberately not an HTTP/API transport. The contract:
+
+- input is the Stage A `HostTelemetry`; no competing telemetry model;
+- the reported node must be a configured Sentinel node, looked up via
+  the existing `SentinelConfig.host()` contract — verbatim,
+  case-sensitive, no normalization or case folding. An unknown node
+  fails closed with an explicit error **before any write**;
+- the central `received_at` moment is assigned by the Sentinel
+  ingestion layer via an injectable clock (production default:
+  timezone-aware UTC). The reporter never defines the authoritative
+  receive moment. A clock result must be truly timezone-aware
+  (`tzinfo is not None` AND `utcoffset() is not None`), matching the
+  B1 timestamp rule — otherwise the observation is rejected without
+  a write;
+- the server-reported `telemetry.timestamp` is a separate time axis
+  (`reported_at`), stored alongside `received_at` and never replaced
+  by it;
+- server-reported telemetry passes through ingestion unmodified;
+- persistence goes exclusively through the B1 `HeartbeatRepository`;
+  repository failures propagate and are never masked as successful
+  receipts;
+- a successful insert returns a minimal typed receipt: node,
+  persistence observation id, `received_at`;
+- every accepted heartbeat is a separate observation — B2 defines no
+  deduplication/idempotency protocol;
+- `services` (present or empty) never participates in ingestion
+  semantics.
+
+Stage B2 does not compute HEALTHY / DEGRADED / DOWN, does not decide
+heartbeat freshness, and applies no clock-skew acceptance policy;
+those belong to stages B/D. HTTP transport, reporter authentication
+and tokens belong to later stages.
