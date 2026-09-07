@@ -10,10 +10,10 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage A1 (Foundation & Architecture Contracts).
+Initial development — Stage B1 (SQLite Persistence Foundation).
 
 - Architecture contracts (product, security, host state semantics,
-  roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+  persistence, roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Development environment and verification commands:
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 - Contribution rules: [CONTRIBUTING.md](CONTRIBUTING.md)
