@@ -236,3 +236,57 @@ Stage B2 does not compute HEALTHY / DEGRADED / DOWN, does not decide
 heartbeat freshness, and applies no clock-skew acceptance policy;
 those belong to stages B/D. HTTP transport, reporter authentication
 and tokens belong to later stages.
+
+## 12. Authenticated heartbeat wire contract (Stage B3)
+
+An external wire/auth boundary sits in front of the B2 ingestion core
+(`hermes_sentinel.wire`):
+
+    future HTTP POST (Stage B4)
+                |
+    AuthenticatedHeartbeatAdapter.handle(payload, token)
+                |
+    HostTelemetry -> HeartbeatIngestor (B2) -> SQLite (B1)
+
+B3 is deliberately transport-neutral: the adapter accepts an already
+decoded `Mapping[str, object]` plus a separately presented node token.
+JSON bytes/string parsing, Content-Type/header semantics and the HTTP
+server lifecycle belong to Stage B4 and are absent here.
+
+Wire payload contract — exactly the mandatory telemetry MVP fields
+and nothing else: `node`, `reported_at` (ISO 8601, timezone-aware),
+`uptime_seconds`, `load` (`one`/`five`/`fifteen`), `cpu_percent`,
+`ram`, `swap`, `root_fs`, `root_inodes` (each `used`/`total`/
+`percent`). The payload never carries `received_at` (exclusive
+responsibility of the B2 central clock), health state, token or
+incident data.
+
+Decoding is strict and fail-closed (`decode_heartbeat_payload`):
+non-mapping payloads, missing or unknown/extra fields (top-level or
+nested — no wire versioning yet, so extras are rejected), wrong
+scalar types, numeric strings, bools-as-numbers, malformed or naive
+`reported_at`, and invalid/whitespace-only `node` are all rejected
+before ingestion. No silent coercions; values are decoded into the
+typed Stage A domain models so their invariants apply.
+
+Authentication is per-node and fail-closed: each monitored node has
+its own secret token; the presented token is verified against the
+credential of the claimed node only (never "any known token"), with
+the stdlib constant-time `hmac.compare_digest` (verbatim, no
+stripping/normalization; node identity stays case-sensitive like
+B1/B2). Unknown nodes, configured nodes without a credential, wrong,
+empty, whitespace-only or non-string tokens all fail with the same
+generic external `HeartbeatAuthenticationError` — no identity
+enumeration, no secret disclosure. A credential set
+(`NodeCredentials`) is an in-memory runtime mapping, rejects a
+duplicate token assigned to two different nodes at construction, and
+never exposes token values in `repr()` or error texts. Tokens are
+never logged, never persisted in SQLite, never included in receipts
+or exception messages. Authentication and wire decode failures
+happen strictly before the B2 clock and any write; repository/B2
+failures after a successful authentication propagate unchanged.
+
+Out of scope for B3: HTTP listener, headers, JSON byte parsing, TLS,
+credential file/env loaders, token rotation, rate limiting, replay
+protection, clock-skew policy, deduplication, heartbeat freshness
+and HEALTHY/DEGRADED/DOWN computation.
