@@ -5,10 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-sentinel"
 version = "0.1.0"
+description = "Hermes Sentinel - standalone server-first monitoring service (observability only)."
 requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+mypy_path = "src"
