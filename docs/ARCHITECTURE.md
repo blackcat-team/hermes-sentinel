@@ -290,3 +290,73 @@ Out of scope for B3: HTTP listener, headers, JSON byte parsing, TLS,
 credential file/env loaders, token rotation, rate limiting, replay
 protection, clock-skew policy, deduplication, heartbeat freshness
 and HEALTHY/DEGRADED/DOWN computation.
+
+## 13. Heartbeat HTTP request contract (Stage B4)
+
+A minimal stdlib-only HTTP request adapter sits in front of the B3
+wire boundary (`hermes_sentinel.http_api`):
+
+    future HTTP listener (Stage B5)
+                |
+    HeartbeatHttpAdapter.handle(HttpRequest) -> HttpResponse
+                |
+    strict UTF-8 JSON Mapping + X-Sentinel-Token header value
+                |
+    AuthenticatedHeartbeatAdapter (B3) -> B2 -> B1
+
+B4 starts no network listener and parses no raw HTTP bytes: the
+socket, connection lifecycle and wire-format parsing belong to a
+later stage. B4 defines only the request/response semantics of the
+single heartbeat endpoint over a minimal typed request/response
+model (`HttpRequest`/`HttpResponse` — header pairs are tuples, not
+dicts, so duplicate headers stay deterministically detectable).
+
+Endpoint: exactly `POST /v1/heartbeat` — no path normalization of
+any kind (trailing slash, query string and percent-encoded
+alternates are 404); the right path with a wrong method is 405 plus
+`Allow: POST` (methods are case-sensitive). The reporter token
+travels in its own `X-Sentinel-Token` header (never in the JSON
+payload), must appear exactly once (case-insensitive name matching),
+and is forwarded to B3 verbatim — B3 stays authoritative for token
+shape, comparison and per-node binding.
+
+Body: raw bytes with a hard limit of 16 KiB
+(`MAX_HEARTBEAT_BODY_BYTES`). Larger is 413, empty is 400;
+socket-level pre-read enforcement is a Stage B5 responsibility.
+Content-Type must be exactly `application/json`, optionally
+`; charset=utf-8` (tokens compared case-insensitively):
+missing/unsupported is 415, malformed or duplicated is 400 — no
+permissive guessing. A malformed request structure (wrong field
+types, CR/LF or other control characters in header names/values)
+fails closed with 400.
+
+JSON decoding is strict: invalid UTF-8, malformed JSON, non-object
+roots, duplicate object keys at any nesting depth, the
+NaN/Infinity/-Infinity constants and pathologically deep nesting
+that exhausts the stdlib parser recursion budget (`RecursionError`)
+are all 400 — deep nesting is malformed/unprocessable client JSON
+at the B4 parsing boundary, not an internal server failure. The
+decoded mapping reaches B3 without semantic mutation; wire schema
+validation stays in B3.
+
+Responses are deterministic: success is 204 with an empty body (the
+B3 receipt is not exposed to the HTTP surface); known client
+failures map to 404/405 (+`Allow: POST`)/413/415/400/401 — always
+with an empty body and `Content-Length: 0`, never containing
+exception text, token material or node existence details.
+`HttpRequest.__repr__` is a compile-time constant (never header
+values, body content or any caller-controlled field repr — secret
+safety and totality on hostile values). After successful HTTP-level
+parsing B4 catches only the two expected
+B3 external input errors (`MalformedHeartbeatPayloadError` -> 400,
+`HeartbeatAuthenticationError` -> 401); the only additional catch
+is `RecursionError`, and only inside the bounded JSON parsing
+boundary (client 400). Any other internal exception — repository,
+B2 or B3 internals, `MemoryError` — propagates unchanged to the
+future server boundary, which owns the
+generic 500 mapping and logging policy.
+
+Out of scope for B4: socket bind/listen, raw HTTP parsing,
+WSGI/ASGI frameworks, TLS, Content-Length pre-read enforcement,
+keep-alive, timeouts, credential loaders, token rotation, replay
+protection and rate limiting.

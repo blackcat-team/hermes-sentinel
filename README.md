@@ -10,9 +10,10 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage B3 (Authenticated Heartbeat Wire) on top
-of the Stage B2 heartbeat ingestion core and the Stage B1 SQLite
-persistence foundation.
+Initial development — Stage B4 (Heartbeat HTTP Request Adapter) on
+top of the Stage B3 authenticated heartbeat wire boundary, the Stage
+B2 heartbeat ingestion core and the Stage B1 SQLite persistence
+foundation.
 
 - Architecture contracts (product, security, host state semantics,
   persistence, roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
