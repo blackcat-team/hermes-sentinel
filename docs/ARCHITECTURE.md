@@ -296,13 +296,13 @@ and HEALTHY/DEGRADED/DOWN computation.
 A minimal stdlib-only HTTP request adapter sits in front of the B3
 wire boundary (`hermes_sentinel.http_api`):
 
-    future HTTP listener (Stage B5)
+    HTTPServer + BaseHTTPRequestHandler (Stage B5)
                 |
-    HeartbeatHttpAdapter.handle(HttpRequest) -> HttpResponse
+     HeartbeatHttpAdapter.handle(HttpRequest) -> HttpResponse
                 |
-    strict UTF-8 JSON Mapping + X-Sentinel-Token header value
+     strict UTF-8 JSON Mapping + X-Sentinel-Token header value
                 |
-    AuthenticatedHeartbeatAdapter (B3) -> B2 -> B1
+     AuthenticatedHeartbeatAdapter (B3) -> B2 -> B1
 
 B4 starts no network listener and parses no raw HTTP bytes: the
 socket, connection lifecycle and wire-format parsing belong to a
@@ -360,3 +360,127 @@ Out of scope for B4: socket bind/listen, raw HTTP parsing,
 WSGI/ASGI frameworks, TLS, Content-Length pre-read enforcement,
 keep-alive, timeouts, credential loaders, token rotation, replay
 protection and rate limiting.
+
+## 14. Heartbeat HTTP listener (Stage B5)
+
+A minimal stdlib bridge binds the B4 request semantics to a real
+network endpoint (`hermes_sentinel.http_server`): the server is
+exactly `http.server.HTTPServer` (serial — NOT
+`ThreadingHTTPServer`), and ALL raw HTTP parsing is the stdlib
+`BaseHTTPRequestHandler` parser. B5 implements NO custom raw HTTP
+protocol parser of its own:
+
+    TCP client (reporter, plaintext)
+                |
+     HTTPServer + BaseHTTPRequestHandler (B5 bridge:
+     stdlib raw HTTP parsing only)
+                |
+     HeartbeatHttpAdapter.handle(HttpRequest) -> HttpResponse   (B4)
+                |
+     AuthenticatedHeartbeatAdapter (B3) -> B2 -> B1 -> SQLite
+
+B5 owns only the transport/framing bridge; routing, method,
+header, body, JSON and authentication semantics stay exclusively
+in B4/B3 — B5 implements no second HTTP semantics layer and never
+inspects the token.
+
+**Plaintext boundary (FROZEN)**: B5 is a plaintext *backend*
+listener. It is NOT a production Internet-facing endpoint.
+Production reporters reach Sentinel through outbound HTTPS only;
+TLS termination and network exposure belong to later production
+hardening/deployment stages (Stage F). TLS is deliberately not
+implemented here.
+
+- server API: `create_heartbeat_http_server(adapter, host, port)`
+  returns a ready-to-serve `HTTPServer` subclass; `port=0` is
+  allowed (ephemeral port discovery via `server_address`);
+  `serve_forever`/`shutdown`/`server_close` stay the standard
+  lifecycle; there is no global singleton;
+- one request per connection: after the response the connection is
+  closed (`Connection: close` always). No keep-alive, no
+  pipelining. B5 deliberately introduces NO production connection
+  timeout policy — that is Stage F / deployment hardening scope;
+- routing stays in B4. For a wrong path OR a wrong method the body
+  is NOT read (including announced-but-unsent bodies): the request
+  is handed to B4 with `body=b""` and B4 decides 404/405;
+- ANY syntactically accepted method reaches B4 (generic `do_*`
+  dispatch via `__getattr__`): e.g. `BREW /v1/heartbeat` becomes
+  B4's 405 + `Allow: POST` — never the stdlib default 501;
+- ANY `Expect` header on the exact heartbeat POST is rejected:
+  417, empty body, no interim 100, body never read, B4/B3/B2/B1
+  never invoked (zero persistence rows). PRESENCE ALONE is
+  authoritative — expectation values are never inspected,
+  normalized or parsed. The stdlib `handle_expect_100` hook only
+  covers the specific `100-continue` case, so the framing path
+  detects ANY Expect presence via the multiplicity-preserving
+  stdlib `headers.get_all`. On a wrong route/method Expect never
+  makes the server wait for the body and never disturbs the
+  authoritative B4 404/405 behavior (no 100 is ever sent);
+- framing is required only for the exact `POST /v1/heartbeat`: a
+  missing Content-Length is 411; a duplicated (case-insensitively,
+  via the multiplicity-preserving stdlib `headers.get_all`) or
+  invalid value — anything but plain `[0-9]+` after surrounding
+  OWS: negative, `+10`, comma lists, decimal, hex, empty, internal
+  whitespace, Unicode digits — is 400;
+- `Transfer-Encoding` present (with or without Content-Length) is
+  400; chunked decoding is NOT implemented and the body is never
+  read;
+- pre-read size limit: a Content-Length whose NUMERIC value is
+  above `MAX_HEARTBEAT_BODY_BYTES` (the B4 limit, 16384) is
+  answered 413 immediately — WITHOUT reading the oversized body
+  off the socket and WITHOUT converting the digit string with an
+  unbounded `int()` (Python 3.11+'s integer-string digit safety
+  limit makes that an uncaught `ValueError`; the comparison uses
+  the significant decimal representation, so leading zeroes are
+  numerically insignificant: `"0"*5000 + "1"` is 1, never 413 for
+  textual length). `16384` is not rejected for size alone; `0` is
+  forwarded to B4 as `body=b""` (B4 answers 400);
+- with a valid Content-Length <= 16384 exactly the declared bytes
+  are read; a short EOF / client half-close before the declared
+  size is 400 and B4 is never called with a partial body; bytes
+  beyond the declared length are never read;
+- the B4 `HttpRequest` receives the stdlib-parsed headers as
+  `tuple[tuple[str, str], ...]`; multiplicity is preserved for
+  Content-Type and X-Sentinel-Token (duplicates stay visible as
+  multiple pairs — B4 owns the duplicate semantics). B5 works only
+  with the semantic header values the stdlib parser produced: no
+  raw-header reconstruction, no token stripping/normalization/
+  case-folding;
+- response emission relays the actual B4 status/headers/body plus
+  `Connection: close`. B5-owned statuses (400/411/413/417/500) are
+  always empty-body with `Content-Length: 0`. The stdlib HTML
+  error pages are never used: `send_error` is overridden to a
+  sanitized empty-body emission (parser-selected statuses are
+  kept; no raw request line, header/token/body values or exception
+  text is ever reflected);
+- internal 500 boundary: B4 deliberately propagates unexpected
+  application exceptions. B5 catches `Exception` — ONLY around the
+  `HeartbeatHttpAdapter.handle` call, never `BaseException` — and
+  answers a deterministic empty-body 500 with `Content-Length: 0`.
+  The caught application exception is deliberately NOT logged at
+  all (no `logger.exception`, no traceback, no `exc_info`, no
+  exception text — Stage F owns observability), so no exception
+  message, traceback or potentially sensitive internal data is
+  ever emitted. An internal failure is never turned into a 400;
+- logging: the standard `BaseHTTPRequestHandler` access logging is
+  disabled (`log_message`/`log_error` overridden to emit nothing),
+  and the caught application exception around the B4 dispatch is
+  never logged either. No path, query, request line, headers,
+  token, body, exception message or traceback is ever printed.
+  Observability belongs to Stage F;
+- version disclosure: no `Server`/`Date` headers carrying
+  `BaseHTTP/...` or `Python/...` are emitted — responses use
+  `send_response_only` plus explicit safe headers, never the plain
+  `send_response`;
+- unapproved contracts are deliberately absent: no custom 431 head
+  cap, no custom 505 version policy, no custom
+  UTF-8/surrogateescape header parser, no custom HTTP grammar, no
+  product connection timeout policy. Any status the stdlib parser
+  itself generates is sanitized in its response, without adding an
+  alternative protocol semantics of our own.
+
+Out of scope for B5: TLS (plaintext backend listener — see the
+frozen plaintext boundary above), keep-alive/pipelining, chunked
+transfer, compression, access logging, rate limiting, credential
+loaders, token rotation, replay protection and deployment
+hardening.

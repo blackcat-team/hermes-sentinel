@@ -10,10 +10,16 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage B4 (Heartbeat HTTP Request Adapter) on
-top of the Stage B3 authenticated heartbeat wire boundary, the Stage
-B2 heartbeat ingestion core and the Stage B1 SQLite persistence
-foundation.
+Initial development — Stage B5 (Heartbeat HTTP Server Bridge) on
+top of the Stage B4 heartbeat HTTP request adapter, the Stage B3
+authenticated heartbeat wire boundary, the Stage B2 heartbeat
+ingestion core and the Stage B1 SQLite persistence foundation.
+
+Stage B5 is a plaintext backend listener
+(`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
+HTTP parsing only). It is not a production Internet-facing
+endpoint: production reporters use outbound HTTPS; TLS termination
+belongs to later hardening.
 
 - Architecture contracts (product, security, host state semantics,
   persistence, roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
