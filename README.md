@@ -10,10 +10,16 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage B5 (Heartbeat HTTP Server Bridge) on
-top of the Stage B4 heartbeat HTTP request adapter, the Stage B3
-authenticated heartbeat wire boundary, the Stage B2 heartbeat
+Initial development — Stage C1 (Linux Host Telemetry Collector Core,
+`scripts/sentinel-report.sh`) on top of the Stage B5 heartbeat HTTP
+server bridge, the Stage B4 heartbeat HTTP request adapter, the Stage
+B3 authenticated heartbeat wire boundary, the Stage B2 heartbeat
 ingestion core and the Stage B1 SQLite persistence foundation.
+
+Stage C1 is a one-shot bash collector that reads local Linux
+telemetry (/proc, df) and prints exactly one B3 heartbeat JSON
+document. It performs no network delivery — that is Stage C2, and
+the systemd timer/packaging is Stage C3.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

@@ -484,3 +484,110 @@ frozen plaintext boundary above), keep-alive/pipelining, chunked
 transfer, compression, access logging, rate limiting, credential
 loaders, token rotation, replay protection and deployment
 hardening.
+
+## 15. Host reporter collector (Stage C1)
+
+The monitored node's side of the heartbeat contract is a single
+one-shot bash script, `scripts/sentinel-report.sh` (Ubuntu Linux /
+bash target). The frozen reporter architecture stays lightweight:
+
+    systemd timer (Stage C3)
+                |
+     one-shot sentinel-report.sh (this stage)
+                 |  read local Linux telemetry
+                 |  print one heartbeat JSON document
+     outbound HTTPS POST (Stage C2 — not part of C1)
+
+C1 performs **no network delivery of any kind** and requires **no
+Python, jq or other extra packages** on the monitored host — only
+ordinary `/proc`, `df`, `date`, `sleep`, `awk`, `printf` and standard
+bash builtins/coreutils. There is deliberately **no second Python
+implementation of the collector**: Python appears only in the test
+harness (fixture provider, JSON parser, B3 contract oracle).
+
+- **Node identity is configuration, never hostname inference**: the
+  script requires `SENTINEL_NODE` and fails non-zero before producing
+  any payload when it is absent or invalid. The documented reporter
+  constraint on node text is deterministic: groups of ASCII letters,
+  digits, dot, underscore and hyphen, separated by single spaces (no
+  leading/trailing whitespace, quotes, backslashes, control
+  characters or other symbols). An accepted value is emitted verbatim
+  as the wire field `node` — no case folding, no trimming, no silent
+  mutation ("Prod", "Hermes", "VPN-1", "VPN-2" all stay distinct).
+  Tokens are not part of C1 and no secrets exist in this stage.
+- **Sources and semantics** (all fail-closed — a measurement is never
+  invented, clamped or normalized):
+  - `uptime_seconds`: first field of `/proc/uptime`, finite and >= 0;
+  - `load` 1/5/15: first three fields of `/proc/loadavg`;
+  - `cpu_percent`: interval measurement from the first aggregate
+    `cpu` line of `/proc/stat`, two samples 1 second apart, over
+    user/nice/system/idle/iowait/irq/softirq/steal (guest and
+    guest_nice are never counted a second time): idle_all = idle +
+    iowait, non_idle = user + nice + system + irq + softirq + steal,
+    cpu_percent = 100 * (total_delta - idle_delta) / total_delta.
+    Decreasing counters, total_delta <= 0, or a non-finite / out of
+    [0, 100] result fail closed;
+  - `ram`: `MemTotal`/`MemAvailable` from `/proc/meminfo`, KiB
+    converted to bytes exactly, used = (MemTotal - MemAvailable) —
+    deliberately not MemFree. Physical RAM is never an absent
+    resource (unlike swap): `MemTotal == 0` fails closed. Duplicate
+    or missing required keys, wrong units, MemAvailable outside
+    [0, MemTotal] and non-finite (overflowed) values fail closed;
+  - `swap`: `SwapTotal`/`SwapFree` (KiB -> bytes); SwapTotal == 0
+    (with SwapFree == 0) is the absent resource 0/0/0, inconsistent
+    input fails closed;
+  - `root_fs`: exactly the `/` filesystem via `LC_ALL=C df -P -B1 /`
+    (bytes); `root_inodes`: `LC_ALL=C df -Pi /` (counts). df output is
+    validated mode-aware against the expected C-locale structure:
+    the header's semantic fields must match (`Filesystem` /
+    variable block-size label / `Used` / `Available` / `Capacity` /
+    `Mounted on` for bytes; `Filesystem` / `Inodes` / `IUsed` /
+    `IFree` / `IUse%` / `Mounted on` for inodes), and the data row
+    must have exactly the six `-P` columns with non-negative integer
+    total/used/available, an integer 0..100 capacity token with a
+    literal `%`, mount exactly `/`, used <= total and available <=
+    total. The df capacity value is never trusted as telemetry —
+    percent is recomputed from used/total. The script forces
+    `LC_ALL=C` so df and number formatting are locale-independent.
+- **Output contract**: success is exit 0 with exactly one complete
+  heartbeat JSON document on stdout (the exact Stage B3 wire payload
+  — `node`, `reported_at`, `uptime_seconds`, `load`, `cpu_percent`,
+  `ram`, `swap`, `root_fs`, `root_inodes` and nothing else; metrics
+  are JSON numbers, never numeric strings). Every collection failure
+  is a non-zero exit with **no partial JSON on stdout** and a short
+  generic stderr diagnostic that never dumps `/proc` contents. All
+  measurements are collected and validated first; a **final
+  pre-render numeric gate** then rejects any token that is not a
+  plain non-negative decimal (`^[0-9]+([.][0-9]+)?$` for fractional
+  metrics, `^[0-9]+$` for byte/count values) or a fixed-format UTC
+  `reported_at` — so a non-finite awk result (inf/nan), an exponent
+  form, a sign or an empty token can never reach the document. Only
+  then is the JSON rendered exactly once via a single `printf` with
+  only pre-validated allowlisted values, so no unsafe shell
+  interpolation of arbitrary data into JSON can occur.
+- **`reported_at`** is host UTC time in timezone-aware ISO 8601
+  (`YYYY-MM-DDTHH:MM:SS+00:00`, e.g. `2026-09-10T08:00:00+00:00`).
+  The reporter owns only `reported_at`; the central `received_at`
+  remains B2 responsibility. All arithmetic lives in awk (IEEE
+  doubles), never in shell integer arithmetic, so huge-but-finite
+  kernel counters cannot overflow.
+- **Testability**: metric parsing/calculation lives in small bash
+  functions (`parse_uptime`, `parse_loadavg`, `read_cpu_sample`,
+  `compute_cpu_percent`, `parse_ram_usage`, `parse_swap_usage`,
+  `parse_root_usage`, `validate_node_identity`,
+  `require_metric_decimal`/`require_metric_count`/
+  `require_metric_timestamp`), and the script is
+  sourceable without executing `main`. Documented deterministic test
+  seams (`SENTINEL_PROC_UPTIME`, `SENTINEL_PROC_LOADAVG`,
+  `SENTINEL_PROC_MEMINFO`, `SENTINEL_PROC_STAT_A`/`_B`,
+  `SENTINEL_DF_BYTES_FILE`, `SENTINEL_DF_INODES_FILE`) redirect the
+  sources to synthetic fixtures under `tests/fixtures/reporter/**`
+  so tests never depend on the developer machine's live `/proc`.
+  At least one integration test proves the accepted B3 decoder
+  (`decode_heartbeat_payload`) accepts the produced payload.
+
+Out of scope for C1: any HTTP/HTTPS delivery, endpoint/token
+configuration, retry/backoff, TLS, systemd unit/timer, deployment,
+secret loaders, health thresholds, heartbeat freshness, TCP
+reachability, incidents, Telegram and Hermes integration (Stages C2,
+C3, D, E and F).
