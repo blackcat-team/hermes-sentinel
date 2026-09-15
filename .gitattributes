@@ -1,0 +1,9 @@
+# RH1 — repository-local LF checkout policy.
+#
+# Bounded to the demonstrated Linux-sensitive reporter surface: these
+# files carry LF bytes in the Git index and must materialize as LF in
+# every worktree regardless of ambient global/user core.autocrlf.
+# Deliberately NOT a repository-wide `* text eol=lf` rule.
+*.sh text eol=lf
+packaging/systemd/** text eol=lf
+tests/fixtures/reporter/** text eol=lf
