@@ -10,20 +10,17 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage C3 (systemd Reporter Timer / Packaging)
-on top of the Stage C2 HTTPS one-shot reporter transport
-(`scripts/sentinel-report.sh`), the Stage C1 Linux host telemetry
-collector, the Stage B5 heartbeat HTTP server bridge, the Stage B4
-heartbeat HTTP request adapter, the Stage B3 authenticated heartbeat
-wire boundary, the Stage B2 heartbeat ingestion core and the Stage B1
-SQLite persistence foundation.
+Initial development — Stage D1 (deterministic health signals core)
+on top of the Stage C host reporter and the Stage B heartbeat
+pipeline.
 
-Stage C now consists of the C1 collector, the C2 HTTPS one-shot
-transport and the C3 systemd timer/packaging: executing
-`scripts/sentinel-report.sh` is the complete one-shot reporter (the
-exact C1 heartbeat JSON, exactly ONE outbound HTTPS POST via `curl`,
-token in the `X-Sentinel-Token` header, only HTTP 204 is success, no
-retries), and Stage C3 packages it for a monitored Ubuntu host as
+Stage C is CLOSED in repository: the Stage C1 Linux telemetry
+collector, the Stage C2 HTTPS one-shot transport and the Stage C3
+systemd timer/packaging. Executing `scripts/sentinel-report.sh` is
+the complete one-shot
+reporter (the exact C1 heartbeat JSON, exactly ONE outbound HTTPS
+POST via `curl`, token in the `X-Sentinel-Token` header, only HTTP
+204 is success, no retries), packaged for a monitored Ubuntu host as
 declarative systemd units (`packaging/systemd/**` — a oneshot
 `hermes-sentinel-reporter.service` plus a ~60-second
 `hermes-sentinel-reporter.timer`) with a dedicated unprivileged
@@ -32,6 +29,18 @@ operator runbook [docs/REPORTER_DEPLOYMENT.md](docs/REPORTER_DEPLOYMENT.md).
 Deployment is a local operator action — this repository state is
 packaging only, not a claim of a deployed or production-verified
 installation.
+
+Stage D1 adds the deterministic health signals core
+(`src/hermes_sentinel/health.py`): heartbeat freshness
+MISSING/FRESH/STALE evaluated on the central `received_at` time
+axis, and resource threshold breach signals
+(CPU/RAM/swap/disk/inodes/load5, equality is a breach, canonical
+breach order). It is a pure signal layer: it does not yet decide
+HEALTHY/DEGRADED/DOWN, does not yet probe external TCP reachability
+and applies no debounce/hysteresis — those belong to the remaining
+Stage D units (D2 external TCP probe, D3 host state resolver with
+debounce/hysteresis, D4 health engine orchestration), which are not
+started.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

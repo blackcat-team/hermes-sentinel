@@ -789,3 +789,68 @@ reachability, HEALTHY/DEGRADED/DOWN, thresholds, hysteresis
 (Stage D); incidents and Telegram (Stage E); TLS termination,
 reverse proxy, server deployment, advanced reporter hardening, rate
 limiting, credential rotation, production observability (Stage F).
+
+## 18. Deterministic health signals core (Stage D1)
+
+Stage D1 adds a pure, deterministic signal layer
+(`hermes_sentinel.health`). It answers exactly two questions and
+nothing else: is the latest accepted heartbeat MISSING / FRESH /
+STALE, and which configured resource thresholds are breached. It
+does not decide HEALTHY / DEGRADED / DOWN.
+
+- **Central time authority**: heartbeat freshness is evaluated
+  exclusively against the central `HeartbeatRecord.received_at` time
+  axis assigned by the Stage B2 ingestion clock. The reporter-side
+  `telemetry.timestamp` (`reported_at`) is a separate time axis and
+  never participates in freshness.
+- **Freshness statuses**: `HeartbeatFreshness.MISSING` — no accepted
+  heartbeat exists at all; `age_seconds` is `None` (a missing
+  heartbeat is never converted into a fake timestamp or a host
+  state). `FRESH` / `STALE` carry a finite, non-negative
+  `age_seconds = now - latest_received_at`.
+- **Equality boundary**: `stale_after_seconds` is the sole freshness
+  authority. `0 <= age <= stale_after_seconds` is FRESH — exact
+  threshold equality stays FRESH; `age > stale_after_seconds` is
+  STALE. No grace periods exist.
+- **`expected_interval_seconds` does not itself change status**: an
+  age above the expected interval but below the stale threshold
+  remains FRESH. No intermediate status (LATE/WARNING/...) is
+  invented from the expected interval alone.
+- **Clock safety**: `now` and a non-None `latest_received_at` must
+  be truly timezone-aware (`tzinfo is not None` AND
+  `utcoffset() is not None`); effectively naive values are rejected
+  with `ValueError`. Offset-aware timestamps with different UTC
+  offsets compare by instant. A `latest_received_at` in the future
+  relative to `now` means the central clock moved backwards or the
+  evidence is inconsistent — it fails closed with `ValueError` (no
+  clamping to zero, no `abs()`, no reporter-timestamp substitution).
+  The module never reads a wall clock: all time enters explicitly
+  as function arguments.
+- **Resource breach boundary**: a metric breaches when
+  `metric >= configured threshold` — equality is a breach. Exact
+  mappings: CPU (`cpu_percent`), RAM (`ram.percent`), SWAP
+  (`swap.percent`), DISK (`root_filesystem.percent`), INODES
+  (`root_inodes.percent`), LOAD5 (`load.five` vs `load5_max`).
+  There are deliberately no load1/load15 thresholds.
+- **LOAD5 is optional**: `thresholds.load5_max is None` disables the
+  load check entirely — no LOAD5 breach can be emitted regardless of
+  the observed load average.
+- **Absent swap** (the normal domain shape `used=0 / total=0 /
+  percent=0`, e.g. swap disabled) is not special-cased: under a
+  normal positive swap threshold it is simply not breached.
+- **Deterministic breach order**: `ResourceAssessment.breaches` is
+  an immutable tuple in the canonical order CPU, RAM, SWAP, DISK,
+  INODES, LOAD5 — never a set or list.
+- **Signal-only boundary**: resource issues (and freshness
+  statuses) are facts, not state decisions. Resource breaches may
+  later produce DEGRADED but never DOWN; D1 performs no
+  HEALTHY/DEGRADED/DOWN resolution and emits no `HostTransition`.
+- **Purity**: no I/O, no networking, no repository/SQLite access, no
+  wall-clock reads, no caches or global evaluation state; inputs are
+  never mutated and results are immutable.
+
+D1 owns no external TCP reachability probe, no debounce/hysteresis
+and no orchestration: D2 (external TCP reachability probe), D3 (host
+state resolver + debounce/hysteresis) and D4 (health engine
+orchestration) remain future stage D units and are deliberately
+absent here.
