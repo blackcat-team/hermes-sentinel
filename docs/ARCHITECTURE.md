@@ -591,3 +591,113 @@ configuration, retry/backoff, TLS, systemd unit/timer, deployment,
 secret loaders, health thresholds, heartbeat freshness, TCP
 reachability, incidents, Telegram and Hermes integration (Stages C2,
 C3, D, E and F).
+
+## 16. HTTPS one-shot reporter transport (Stage C2)
+
+Stage C2 turns the C1 collector into the complete one-shot reporter.
+Executing `scripts/sentinel-report.sh` IS the production reporter
+path — there is deliberately no second reporter, no daemon, no
+Python runtime on the monitored host and no local spool/queue:
+
+    systemd timer (Stage C3)
+                |
+     one-shot sentinel-report.sh (C1 collection + C2 transport)
+                  |  validate transport configuration
+                  |  collect the exact C1 payload
+                  |  deterministic size gate
+                  |  ONE outbound HTTPS POST
+                  |  require HTTP 204
+     exit (success: exit 0, empty stdout)
+
+- **Transport dependency**: exactly one monitored-host transport
+  dependency is added — `curl`. No Python, no jq, no wget fallback,
+  no alternate HTTP client. A missing curl is a non-zero failure with
+  empty stdout and a short generic stderr diagnostic.
+- **Collection authority**: the accepted C1 collector is refactored
+  into a sourceable `collect_payload` function — the ONLY collection
+  logic. The executable path (`main`) validates transport
+  configuration first (cheap failures never collect), then invokes
+  `collect_payload`, applies the size gate and performs the single
+  `send_heartbeat`. No production bypass variable (TEST_MODE /
+  SENTINEL_COLLECT_ONLY / SENTINEL_DISABLE_NETWORK) exists: C1
+  fixture tests source the real script and call the real collection
+  function, while the executable always attempts delivery after a
+  successful collection.
+- **Transport configuration**: `SENTINEL_ENDPOINT` (mandatory, the
+  FULL heartbeat endpoint URL such as
+  `https://sentinel.example/v1/heartbeat`) and `SENTINEL_TOKEN`
+  (mandatory reporter token). The endpoint must use HTTPS — `http://`
+  is rejected, as are empty values and any value containing
+  whitespace or control characters — and is used VERBATIM: no path is
+  added or normalized, no URL is derived from the hostname, no
+  service discovery. The token is constrained to the documented
+  transport-safe reporter alphabet (one or more characters from
+  `A-Z a-z 0-9 . _ ~ -`): no whitespace, no CR/LF, no control
+  characters, no quotes, no trimming/case-folding/normalization, and
+  deliberately no entropy or minimum-length policy (that belongs to
+  deployment hardening).
+- **Exactly one request attempt**: no retry, no retry-after, no
+  backoff, no loop. Redirects are never followed (no
+  `--location`/`-L`): a 3xx response is a failure, not a second
+  request. Success requires the final HTTP status to be EXACTLY
+  `204` — 200/201/202, 3xx, 4xx and 5xx all fail. A single attempt
+  is bounded by fixed limits (connect timeout 10 s, overall request
+  timeout 20 s); timeout tuning belongs to Stage F.
+- **HTTPS-only / TLS**: `curl --proto '=https'` prevents any
+  non-HTTPS protocol use; default certificate and hostname
+  verification stay enabled; `--insecure`/`-k` are never used.
+  Ambient curl configuration is isolated: `--disable` is passed as
+  the FIRST curl option, so host- or user-level curl config files
+  (`CURL_HOME/.curlrc`, XDG config, `~/.curlrc`) are never read and
+  can never inject `--insecure`, `--location`, `--retry`, extra
+  headers or tracing into the reporter request — the frozen runtime
+  invariants hold for the EFFECTIVE invocation, not merely for the
+  script's explicit argv (curl only honors the config-disabling
+  option in first position, hence the placement). No certificate
+  pinning, custom production CA loader or client certificate
+  support (later deployment/hardening concerns).
+- **Request contract**: `POST <SENTINEL_ENDPOINT>` with
+  `Content-Type: application/json` and `X-Sentinel-Token: <exact
+  reporter token>` headers, and the EXACT C1 JSON as the body — no
+  `received_at`, `state`, `health`, `services`, transport metadata,
+  token in JSON, or semantic re-serialization/mutation of the C1
+  payload. The `Expect: 100-continue` header curl would otherwise
+  emit is suppressed via curl's explicit header-suppression semantics
+  (`-H 'Expect:'` — transmission suppressed, NOT an empty header on
+  the wire), because the accepted B5 rejects ANY Expect header with
+  417. The body length is known: `--data-binary` produces ordinary
+  `Content-Length` framing — never `Transfer-Encoding: chunked`, no
+  compression.
+- **Payload size gate**: before curl is invoked the payload length
+  must be `> 0` and `<= 16384` bytes (exactly the accepted B4 server
+  limit; deterministic because the C1 payload is ASCII-only).
+  Oversized or empty input fails non-zero without invoking curl and
+  is never truncated.
+- **Token secret safety**: the token never enters the JSON, is never
+  printed to stdout/stderr, is never persisted, never written to a
+  temporary file and never appears in curl argv. It reaches curl
+  only through the protected stdin header path (`--header @-` fed by
+  `printf 'X-Sentinel-Token: %s\n'`). Before any child process is
+  spawned the exported `SENTINEL_TOKEN` is captured into a
+  non-exported local variable and removed from the child
+  environment; shell xtrace is disabled for the whole
+  configuration/transport path so `bash -x` can never print it.
+- **Output safety**: curl's response body, progress meter, raw
+  diagnostics and headers never reach reporter stdout — `--silent`,
+  `--output /dev/null`, only `--write-out '%{http_code}'` is
+  captured, and raw curl stderr is suppressed so the reporter emits
+  its own short generic failure. `--verbose`/`--trace` are never
+  used. On success: exit 0, empty stdout. On ANY failure (missing
+  curl, invalid/missing endpoint or token, collection failure, empty
+  or oversized payload, DNS/TCP/TLS failure, curl non-zero exit,
+  HTTP != 204): non-zero exit, empty stdout, one short generic
+  stderr diagnostic that never contains the token, the payload or
+  the response body. A failed heartbeat is simply not delivered —
+  no local persistence, no retry queue.
+
+Out of scope for C2: systemd service/timer units, `/etc` install
+paths, deployment commands, secret-file provisioning, token
+rotation, retries, local spool/queue, persistent reporter process,
+TLS termination on Sentinel, reverse proxy, server deployment,
+health engine, TCP reachability checks, incidents, Telegram and
+Hermes integration (Stages C3 / D / E / F).

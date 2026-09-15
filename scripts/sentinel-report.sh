@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
 #
-# Hermes Sentinel — Stage C1 Linux host telemetry collector.
+# Hermes Sentinel — Stage C2 one-shot HTTPS host reporter.
 #
-# One-shot reporter core for Ubuntu Linux / bash: reads local host
-# metrics and prints exactly one heartbeat JSON document (the accepted
-# Stage B3 wire payload) on stdout. This script performs NO network
-# delivery (Stage C2) and needs NO Python, jq or other extra packages
-# on the monitored host — only ordinary /proc, df, date, sleep, awk,
-# printf and standard bash builtins/coreutils.
+# One-shot reporter for Ubuntu Linux / bash: reads local host metrics
+# (the accepted Stage C1 collector) and performs exactly ONE outbound
+# HTTPS POST of the heartbeat JSON document (the accepted Stage B3
+# wire payload) to the configured Sentinel heartbeat endpoint. The
+# script then exits — there is no daemon, no retry loop and no local
+# spool/queue. It needs NO Python, jq or other extra packages on the
+# monitored host — only ordinary /proc, df, date, sleep, awk, printf,
+# standard bash builtins/coreutils and curl (the single C2 transport
+# dependency).
 #
 # Usage:
-#     SENTINEL_NODE=<node> scripts/sentinel-report.sh
+#     SENTINEL_NODE=<node> \
+#     SENTINEL_ENDPOINT=https://sentinel.example/v1/heartbeat \
+#     SENTINEL_TOKEN=<reporter-token> \
+#     scripts/sentinel-report.sh
 #
 # Contracts:
-#   - success: exit 0, stdout = exactly one complete heartbeat JSON
-#     document, no diagnostic prose on stdout;
-#   - any collection/configuration failure: non-zero exit, NO partial
-#     JSON on stdout, a short generic diagnostic on stderr (never
-#     /proc contents);
+#   - success (HTTP 204 exactly): exit 0, stdout EMPTY — the payload,
+#     the response body and the token are never printed;
+#   - any configuration/collection/transport failure: non-zero exit,
+#     EMPTY stdout, one short generic diagnostic on stderr (never
+#     /proc contents, never the token, never the response body);
 #   - fail closed: a measurement is never invented, clamped into
 #     range or silently normalized. A final pre-render numeric gate
 #     additionally rejects any non-finite (inf/nan), exponent or
-#     signed token before the single JSON render.
+#     signed token before the single JSON render;
+#   - transport is HTTPS-only (curl --proto '=https', default
+#     certificate/hostname verification, no --insecure), ambient
+#     curl configuration is disabled (--disable, first option),
+#     redirects are never followed and only HTTP 204 is success.
 #
 # Node identity is configuration, never hostname inference:
 #   SENTINEL_NODE is required. Documented deterministic reporter
@@ -32,9 +42,30 @@
 #   VERBATIM as the wire field "node" — no case folding, no trimming,
 #   no other mutation ("Prod" and "prod" stay distinct).
 #
+# Transport configuration (Stage C2):
+#   SENTINEL_ENDPOINT is required: the FULL heartbeat endpoint URL,
+#   HTTPS only (http:// is rejected), e.g.
+#   https://sentinel.example/v1/heartbeat. The value is used
+#   VERBATIM — the reporter never derives a URL from the hostname,
+#   never adds or normalizes a path, and performs no service
+#   discovery. Empty values and values containing whitespace or
+#   control characters are rejected before curl is ever invoked.
+#   SENTINEL_TOKEN is required: the reporter token. Documented
+#   deterministic transport constraint (a narrow subset of the B3
+#   in-memory token contract): one or more characters from
+#   A-Z a-z 0-9 . _ ~ -  — no whitespace, no CR/LF, no control
+#   characters, no quotes. The accepted value is used VERBATIM (no
+#   trimming, no case folding) and is transported to curl ONLY
+#   through a protected stdin header path (--header @-), never in
+#   argv, never in JSON, never on stdout/stderr. Before any child
+#   process is spawned the exported SENTINEL_TOKEN variable is
+#   captured into a non-exported local variable and removed from the
+#   child environment, and shell xtrace is disabled for the whole
+#   configuration/transport path so `bash -x` can never print it.
+#
 # Deterministic test seams (production defaults are the live Linux
 # sources; fixtures use these to make the collector testable without
-# depending on the machine's live /proc):
+# depending on the developer machine's live /proc):
 #   SENTINEL_PROC_UPTIME     path to a /proc/uptime-format file
 #   SENTINEL_PROC_LOADAVG    path to a /proc/loadavg-format file
 #   SENTINEL_PROC_MEMINFO    path to a /proc/meminfo-format file
@@ -75,6 +106,62 @@ validate_node_identity() {
     local value=${1-}
     [[ -n $value ]] || return 1
     [[ $value =~ ^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$ ]]
+}
+
+# --- transport configuration (Stage C2) ------------------------------------
+
+# Accepted heartbeat body limit in bytes — exactly the accepted B4
+# server limit (MAX_HEARTBEAT_BODY_BYTES). Enforced deterministically
+# BEFORE curl is invoked: the C1 payload is ASCII-only under the
+# accepted C1 contracts, so the bash string length IS the exact wire
+# byte length. An empty or oversized payload fails closed and is
+# never truncated.
+SENTINEL_MAX_BODY_BYTES=16384
+
+# Fixed single-attempt transport limits (seconds) for the one-shot
+# timer-driven reporter. Deliberately NO retry policy of any kind —
+# advanced timeout tuning belongs to Stage F.
+SENTINEL_CONNECT_TIMEOUT_SECONDS=10
+SENTINEL_REQUEST_TIMEOUT_SECONDS=20
+
+validate_endpoint_url() {
+    # SENTINEL_ENDPOINT: mandatory, HTTPS-only, used VERBATIM.
+    # Rejected before curl is ever invoked: the empty value, any
+    # value not starting with the literal `https://` (this includes
+    # every `http://` value), and any value containing whitespace or
+    # control characters (space, tab, CR, LF, DEL — nothing that
+    # could mutate the request line or smuggle a second header).
+    # No path is added, nothing is normalized: the configured value
+    # is handed to curl exactly as configured.
+    local value=${1-}
+    [[ -n $value ]] || return 1
+    [[ $value =~ ^https://[^[:space:][:cntrl:]]+$ ]]
+}
+
+validate_reporter_token() {
+    # SENTINEL_TOKEN: mandatory reporter token in the documented
+    # transport-safe form — one or more characters from
+    # A-Z a-z 0-9 . _ ~ -  (the RFC 3986 unreserved set). No
+    # whitespace, no CR/LF, no control characters, no quotes: the
+    # value can never break header framing. This is a deliberately
+    # narrow transport subset of the broader B3 in-memory token
+    # contract; no entropy or minimum-length policy is imposed here
+    # (token strength/provisioning belongs to deployment hardening).
+    # The accepted value is used VERBATIM — never trimmed,
+    # case-folded or otherwise normalized.
+    local value=${1-}
+    [[ -n $value ]] || return 1
+    [[ $value =~ ^[A-Za-z0-9._~-]+$ ]]
+}
+
+validate_payload_size() {
+    # Deterministic pre-transport size gate. The payload is ASCII
+    # (accepted C1 contracts), so ${#1} is the exact byte length the
+    # server will receive. Valid: 0 < length <= 16384. The payload
+    # is never truncated — oversized input is a hard failure.
+    local payload=$1
+    local size=${#payload}
+    (( size > 0 && size <= SENTINEL_MAX_BODY_BYTES ))
 }
 
 # --- /proc parsers (fail closed, print validated values) -----------------
@@ -389,9 +476,19 @@ require_metric_timestamp() {
     [[ $token =~ $pattern ]] || return 1
 }
 
-# --- main: collect everything, then render the JSON exactly once ---------
+# --- collection authority (Stage C1, sourceable) ---------------------------
+#
+# collect_payload: the complete accepted C1 collector — the ONLY
+# collection logic in the reporter. Prints exactly one heartbeat JSON
+# document (the accepted B3 wire payload) on stdout and nothing else;
+# any failure is a non-zero exit with NO partial JSON on stdout and a
+# short generic stderr diagnostic. Kept as a sourceable function (the
+# script is a no-op when sourced) so C1 fixture tests exercise the
+# ACTUAL production collection logic; the executable path (main
+# below) validates transport configuration, invokes this function and
+# performs the single HTTPS delivery.
 
-main() {
+collect_payload() {
     local node=${SENTINEL_NODE-}
     if ! validate_node_identity "$node"; then
         fail "SENTINEL_NODE is required and must match the documented node identity constraint"
@@ -497,6 +594,143 @@ main() {
         "$swap_used" "$swap_total" "$swap_percent" \
         "$fs_used" "$fs_total" "$fs_percent" \
         "$ino_used" "$ino_total" "$ino_percent"
+}
+
+# --- transport (Stage C2) ---------------------------------------------------
+
+send_heartbeat() {
+    # Exactly ONE outbound HTTPS POST attempt — no retry, no
+    # retry-after, no backoff, no loop. Arguments:
+    #   $1 endpoint — validated https:// URL, used verbatim;
+    #   $2 payload  — the exact C1 JSON document (size-gated);
+    #   $3 token    — validated reporter token, a NON-EXPORTED copy.
+    #
+    # curl invocation policy:
+    #   - `--disable` is the FIRST curl option: loading of ambient
+    #     curl configuration (CURL_HOME/.curlrc, XDG config,
+    #     ~/.curlrc) is prevented entirely, so a host- or user-level
+    #     curl config can never inject --insecure, --location,
+    #     --retry, extra headers or tracing options into the reporter
+    #     request. The frozen C2 runtime invariants hold for the
+    #     EFFECTIVE invocation, not merely for this script's explicit
+    #     argv (curl only honors the config-disabling option in first
+    #     position, hence the placement);
+    #   - POST with Content-Type: application/json;
+    #   - `-H 'Expect:'` is curl's documented header-suppression
+    #     form: the Expect: 100-continue header curl would otherwise
+    #     emit for larger bodies is NOT transmitted at all (the
+    #     accepted B5 rejects ANY Expect header with 417). It does
+    #     NOT send an empty Expect header on the wire;
+    #   - the token reaches curl ONLY through stdin (`--header @-`
+    #     reads additional header lines from stdin): it is never an
+    #     argv element, so it can never appear in a process listing;
+    #   - `--proto '=https'`: HTTPS only — non-HTTPS protocols can
+    #     never be used even by a misconfigured endpoint value;
+    #   - no --location: a redirect (3xx) is a failure, never a
+    #     second request;
+    #   - `--data-binary`: known body length, ordinary Content-Length
+    #     framing, never Transfer-Encoding: chunked, no compression;
+    #   - `--silent` + `--output /dev/null`: response body and
+    #     progress meter never reach reporter stdout; only the HTTP
+    #     status code is captured via `--write-out '%{http_code}'`;
+    #   - raw curl stderr is suppressed: on failure the reporter
+    #     emits its own short generic diagnostic (never token,
+    #     header, payload or response-body values);
+    #   - fixed single-attempt limits: connect timeout 10 s, overall
+    #     request timeout 20 s.
+    local endpoint=$1
+    local payload=$2
+    local token=$3
+    local status
+
+    status=$(
+        printf 'X-Sentinel-Token: %s\n' "$token" | curl \
+            --disable \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header 'Expect:' \
+            --header @- \
+            --data-binary "$payload" \
+            --proto '=https' \
+            --connect-timeout "$SENTINEL_CONNECT_TIMEOUT_SECONDS" \
+            --max-time "$SENTINEL_REQUEST_TIMEOUT_SECONDS" \
+            --silent \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "$endpoint" 2>/dev/null
+    ) || return 1
+
+    # Success requires the final HTTP status to be EXACTLY 204 — not
+    # merely any 2xx. 200/201/202, 3xx, 4xx and 5xx all fail. A
+    # redirect surfaces here as its own status code (never followed)
+    # and fails; a curl-level failure (DNS, TCP, TLS validation,
+    # timeout, non-zero exit) already returned 1 above.
+    [[ $status == 204 ]]
+}
+
+# --- executable path (Stage C2): validate → collect → size-gate → send ----
+
+main() {
+    # Secret safety: shell xtrace (bash -x) would print SENTINEL_TOKEN
+    # the moment it is read into a variable or passed as a function
+    # argument. Disable xtrace for the ENTIRE configuration/transport
+    # path; it is restored only after the one-shot heartbeat attempt
+    # has completed. (Failure paths exit the process — there is
+    # nothing left to restore.)
+    local restore_xtrace=0
+    if [[ $- == *x* ]]; then
+        restore_xtrace=1
+        set +x
+    fi
+
+    # Transport configuration is validated BEFORE the expensive
+    # collection: an invalid endpoint/token or a missing curl fails
+    # immediately, and no request can ever be emitted with incomplete
+    # or invalid configuration.
+    local endpoint=${SENTINEL_ENDPOINT-}
+    if ! validate_endpoint_url "$endpoint"; then
+        fail "SENTINEL_ENDPOINT is required and must be an https:// URL"
+    fi
+
+    local token=${SENTINEL_TOKEN-}
+    if ! validate_reporter_token "$token"; then
+        fail "SENTINEL_TOKEN is required and must match the documented reporter token constraint"
+    fi
+
+    command -v curl >/dev/null 2>&1 \
+        || fail "curl is required for heartbeat delivery"
+
+    # The token is captured into a NON-EXPORTED local variable and
+    # removed from the environment BEFORE any child process is
+    # spawned: neither curl nor any collection helper can inherit it.
+    # It reaches curl exclusively through the protected stdin header
+    # path inside send_heartbeat — never through argv.
+    unset SENTINEL_TOKEN
+
+    # Collection: the exact accepted C1 payload from the single
+    # collection authority. A collection failure fails the whole
+    # report BEFORE curl is invoked. The C1-internal diagnostic is
+    # suppressed here so the executable reporter emits exactly one
+    # short generic message of its own.
+    local payload
+    payload=$(collect_payload 2>/dev/null) \
+        || fail "cannot collect telemetry"
+
+    # Deterministic pre-transport size gate: empty or > 16384 bytes
+    # never invokes curl, and the payload is never truncated.
+    if ! validate_payload_size "$payload"; then
+        fail "heartbeat payload size is outside the accepted transport limit"
+    fi
+
+    send_heartbeat "$endpoint" "$payload" "$token" \
+        || fail "heartbeat delivery failed"
+
+    # Success: exit 0 with EMPTY stdout — the telemetry payload, the
+    # response body and the token are never printed.
+    if (( restore_xtrace )); then
+        set -x
+    fi
+    return 0
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

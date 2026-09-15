@@ -11,6 +11,12 @@ the collector here.
 All collector inputs are synthetic deterministic fixtures under
 ``tests/fixtures/reporter`` or adversarial temp files written by these
 tests — never the developer machine's live /proc values.
+
+Stage C2 note: the production executable now delivers the payload via
+HTTPS. These C1 tests therefore source the real script and invoke its
+sourceable ``collect_payload`` function (the single collection
+authority) directly — see ``_run_collector``. Transport behaviour is
+covered by ``tests/test_reporter_transport.py``.
 """
 
 from __future__ import annotations
@@ -234,8 +240,15 @@ def _fixture_env(
 def _run_collector(
     env: Mapping[str, str],
 ) -> subprocess.CompletedProcess[str]:
+    """Bounded Stage C2 harness adaptation: executing the script now
+    performs HTTPS delivery, so the C1 fixture tests exercise the
+    ACTUAL production collection authority instead — the real script
+    is sourced (a no-op at source time by design) and its sourceable
+    ``collect_payload`` function is invoked directly. No collection
+    logic is duplicated and no production bypass variable exists."""
+    code = f'source "{_bash_path(SCRIPT)}"\ncollect_payload\n'
     return subprocess.run(
-        [_bash(), _bash_path(SCRIPT)],
+        [_bash(), "-c", code],
         env=dict(env),
         capture_output=True,
         text=True,

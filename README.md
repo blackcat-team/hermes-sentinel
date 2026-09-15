@@ -10,16 +10,22 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage C1 (Linux Host Telemetry Collector Core,
-`scripts/sentinel-report.sh`) on top of the Stage B5 heartbeat HTTP
-server bridge, the Stage B4 heartbeat HTTP request adapter, the Stage
-B3 authenticated heartbeat wire boundary, the Stage B2 heartbeat
-ingestion core and the Stage B1 SQLite persistence foundation.
+Initial development — Stage C2 (HTTPS One-shot Reporter Transport,
+`scripts/sentinel-report.sh`) on top of the Stage C1 Linux host
+telemetry collector, the Stage B5 heartbeat HTTP server bridge, the
+Stage B4 heartbeat HTTP request adapter, the Stage B3 authenticated
+heartbeat wire boundary, the Stage B2 heartbeat ingestion core and
+the Stage B1 SQLite persistence foundation.
 
-Stage C1 is a one-shot bash collector that reads local Linux
-telemetry (/proc, df) and prints exactly one B3 heartbeat JSON
-document. It performs no network delivery — that is Stage C2, and
-the systemd timer/packaging is Stage C3.
+Stage C2 makes executing `scripts/sentinel-report.sh` the complete
+one-shot reporter: it collects the exact C1 heartbeat JSON and
+performs exactly ONE outbound HTTPS POST (`curl` is the single added
+monitored-host dependency) to the configured endpoint
+(`SENTINEL_ENDPOINT`, HTTPS-only, used verbatim) with the reporter
+token in the `X-Sentinel-Token` header — never in the payload, never
+in curl argv. Only HTTP 204 is success; redirects are never followed;
+there is no retry loop, no daemon and no local spool. The systemd
+timer/packaging is Stage C3.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
