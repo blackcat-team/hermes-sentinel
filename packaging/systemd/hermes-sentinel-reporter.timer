@@ -1,0 +1,33 @@
+# Hermes Sentinel — Stage C3 systemd reporter heartbeat timer unit.
+#
+# Schedules the one-shot reporter service approximately once per
+# minute: a short initial delay after boot, then a fixed 60-second
+# activation cadence. This is SAMPLING cadence, not a retry policy:
+# a failed oneshot heartbeat does not stop the timer, and the next
+# scheduled activation is simply the next normal measurement attempt.
+# Missed heartbeats after downtime are deliberately NOT replayed
+# (no Persistent=true) — a heartbeat represents the CURRENT host
+# state, not a historical backlog.
+#
+# The timer is the singleton scheduling boundary: exactly one fixed
+# service unit is activated (no templated instances, no systemd-run,
+# no parallel launches), so two reporter processes can never overlap.
+#
+# Install destination (operator action, see docs/REPORTER_DEPLOYMENT.md):
+#   /etc/systemd/system/hermes-sentinel-reporter.timer  (root:root, 0644)
+#
+# Enable target (operator action): the TIMER only —
+#   systemctl enable --now hermes-sentinel-reporter.timer
+
+[Unit]
+Description=Schedule the Hermes Sentinel one-shot host telemetry reporter (heartbeat cadence)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=hermes-sentinel-reporter.service
+
+[Install]
+WantedBy=timers.target

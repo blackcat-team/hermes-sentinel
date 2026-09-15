@@ -1,0 +1,49 @@
+# Hermes Sentinel — Stage C3 systemd oneshot reporter service unit.
+#
+# Declarative packaging for a monitored Ubuntu Linux host. The unit
+# launches ONLY the already-accepted one-shot reporter script
+# (Stage C1 collection + Stage C2 single HTTPS POST) under a dedicated
+# unprivileged system identity. It is normally activated by
+# hermes-sentinel-reporter.timer (or manually, once, for the operator
+# smoke test) — the service itself has no [Install] section and is
+# never enabled directly.
+#
+# Install destination (operator action, see docs/REPORTER_DEPLOYMENT.md):
+#   /etc/systemd/system/hermes-sentinel-reporter.service  (root:root, 0644)
+#
+# Configuration boundary: all reporter configuration
+# (SENTINEL_NODE / SENTINEL_ENDPOINT / SENTINEL_TOKEN) is supplied by
+# the systemd manager from /etc/hermes-sentinel/reporter.env
+# (root:root, 0600). The reporter process itself never needs read
+# permission on that file, and no token, endpoint or node value ever
+# appears in this unit.
+
+[Unit]
+Description=Hermes Sentinel one-shot host telemetry reporter
+Documentation=file:/usr/local/libexec/hermes-sentinel/sentinel-report.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes-sentinel-reporter
+Group=hermes-sentinel-reporter
+EnvironmentFile=/etc/hermes-sentinel/reporter.env
+ExecStart=/usr/local/libexec/hermes-sentinel/sentinel-report.sh
+TimeoutStartSec=30s
+Restart=no
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=

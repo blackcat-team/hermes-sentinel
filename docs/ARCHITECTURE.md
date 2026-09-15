@@ -701,3 +701,91 @@ rotation, retries, local spool/queue, persistent reporter process,
 TLS termination on Sentinel, reverse proxy, server deployment,
 health engine, TCP reachability checks, incidents, Telegram and
 Hermes integration (Stages C3 / D / E / F).
+
+## 17. systemd reporter timer / packaging (Stage C3)
+
+Stage C3 packages the already-accepted C1+C2 reporter for a monitored
+Ubuntu host. It adds NO second reporter implementation — only
+declarative systemd packaging (`packaging/systemd/**`), an operator
+runbook (`docs/REPORTER_DEPLOYMENT.md`) and deterministic packaging
+tests. The final host-side pipeline:
+
+    systemd timer (hermes-sentinel-reporter.timer)
+                 |
+     systemd oneshot service (hermes-sentinel-reporter.service)
+                 |
+      /usr/local/libexec/hermes-sentinel/sentinel-report.sh
+                   |  exact C1 collection
+                   |  exact C2 single HTTPS POST
+      exit
+
+- **Unit names and install paths (frozen)**: the units install as
+  `/etc/systemd/system/hermes-sentinel-reporter.service` and
+  `/etc/systemd/system/hermes-sentinel-reporter.timer` (root:root,
+  0644); the reporter executable installs as
+  `/usr/local/libexec/hermes-sentinel/sentinel-report.sh`
+  (root:root, 0755); the configuration installs as
+  `/etc/hermes-sentinel/reporter.env` (root:root, 0600, directory
+  `/etc/hermes-sentinel` root:root 0750).
+- **Dedicated runtime identity**: the reporter runs as the system
+  account `hermes-sentinel-reporter` (group `hermes-sentinel-reporter`)
+  — no login shell, no home, no sudo, no extra groups, no
+  capabilities, and never root. The runtime user neither owns nor
+  can modify the executable.
+- **EnvironmentFile boundary**: all reporter configuration
+  (`SENTINEL_NODE`, `SENTINEL_ENDPOINT`, `SENTINEL_TOKEN`) is
+  supplied by the systemd manager from `reporter.env`. The reporter
+  process never needs filesystem read permission on that file; no
+  token, endpoint or node value ever appears in the unit files, in
+  unit commands or in command-line arguments. The packaged example
+  (`packaging/systemd/reporter.env.example`) uses only synthetic
+  values, and its token placeholder is deliberately invalid under
+  the C2 token validation so an unedited example fails closed before
+  network delivery.
+- **Timer semantics**: `OnBootSec=30s`, `OnUnitActiveSec=60s`,
+  `AccuracySec=1s`, `RandomizedDelaySec=0`, targeting exactly
+  `hermes-sentinel-reporter.service`, enabled via
+  `WantedBy=timers.target` — approximately one report per minute
+  with a short initial boot delay. No `OnCalendar`, no
+  `Persistent=true` (missed heartbeats are deliberately not
+  replayed: a heartbeat represents current host state, not
+  historical backlog), no retry loops, no extra timer targets.
+- **No immediate retry**: a failed oneshot heartbeat is a service
+  failure (`Restart=no`; C2 non-zero exit is never broadened or
+  wrapped). The next scheduled timer activation is the next NORMAL
+  measurement attempt — sampling cadence, not a transport retry.
+- **Non-overlap / singleton**: one fixed service unit is the
+  singleton execution boundary — no templated `@.service` instances,
+  no `systemd-run`, no background or parallel launches. Because the
+  unit is oneshot, systemd never starts a second instance while one
+  is active; the C2 timeouts (connect 10 s, request 20 s) plus
+  `TimeoutStartSec=30s` bound each run.
+- **Security hardening** (strong but boring and portable):
+  `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices`,
+  `ProtectSystem=strict`, `ProtectHome`, `ProtectKernelTunables`,
+  `ProtectKernelModules`, `ProtectControlGroups`,
+  `RestrictSUIDSGID`, `LockPersonality`, empty
+  `CapabilityBoundingSet`/`AmbientCapabilities`, `UMask=0077`,
+  journal-directed stdout/stderr, and a direct `ExecStart` with no
+  shell wrapper, no sudo/su and no curl in the unit. Network access
+  is deliberately NOT restricted (the reporter needs outbound HTTPS
+  and DNS); deeper hardening (address-family/system-call filtering
+  etc.) may come with Stage F Linux runtime evidence.
+- **Local operator deployment only**: deployment is an operator
+  action performed locally on the monitored host (see
+  `docs/REPORTER_DEPLOYMENT.md`). Sentinel itself never deploys,
+  SSHes, installs files, invokes systemctl or executes remote
+  commands — the observability-only boundary of section 3 is
+  unchanged. There is no automated installer: packaging is
+  declarative files plus documentation.
+
+Stage C3 completes Stage C (HOST REPORTER): C1 collector + C2 HTTPS
+one-shot transport + C3 systemd timer/packaging. Repository
+packaging only — an actual deployment on a monitored host is a
+separate operator action and is not claimed here.
+
+Out of scope for C3: heartbeat freshness evaluation, TCP
+reachability, HEALTHY/DEGRADED/DOWN, thresholds, hysteresis
+(Stage D); incidents and Telegram (Stage E); TLS termination,
+reverse proxy, server deployment, advanced reporter hardening, rate
+limiting, credential rotation, production observability (Stage F).
