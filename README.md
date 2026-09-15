@@ -10,9 +10,9 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage D1 (deterministic health signals core)
-on top of the Stage C host reporter and the Stage B heartbeat
-pipeline.
+Initial development — Stage D2 (external TCP reachability probe) on
+top of the Stage D1 deterministic health signals core, the Stage C
+host reporter and the Stage B heartbeat pipeline.
 
 Stage C is CLOSED in repository: the Stage C1 Linux telemetry
 collector, the Stage C2 HTTPS one-shot transport and the Stage C3
@@ -30,17 +30,24 @@ Deployment is a local operator action — this repository state is
 packaging only, not a claim of a deployed or production-verified
 installation.
 
-Stage D1 adds the deterministic health signals core
-(`src/hermes_sentinel/health.py`): heartbeat freshness
+Stage D1 is CLOSED_GREEN: the deterministic health signals core
+(`src/hermes_sentinel/health.py`) — heartbeat freshness
 MISSING/FRESH/STALE evaluated on the central `received_at` time
 axis, and resource threshold breach signals
 (CPU/RAM/swap/disk/inodes/load5, equality is a breach, canonical
-breach order). It is a pure signal layer: it does not yet decide
-HEALTHY/DEGRADED/DOWN, does not yet probe external TCP reachability
-and applies no debounce/hysteresis — those belong to the remaining
-Stage D units (D2 external TCP probe, D3 host state resolver with
-debounce/hysteresis, D4 health engine orchestration), which are not
-started.
+breach order). It is a pure signal layer with no state decisions.
+
+Stage D2 adds the external TCP reachability evidence primitive
+(`src/hermes_sentinel/reachability.py`): one bounded probe that
+answers exactly "can Sentinel establish a TCP connection to the
+configured external target?" via the standard-library
+`socket.create_connection` with the configured
+`tcp_host`/`tcp_port`/`timeout_seconds`. It returns only
+REACHABLE / UNREACHABLE raw evidence: it does not decide
+HEALTHY/DEGRADED/DOWN, applies no debounce/hysteresis, keeps no
+probe state between calls and performs no retries. Host state
+resolution with debounce/hysteresis (D3) and health engine
+orchestration (D4) — the remaining Stage D units — are not started.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

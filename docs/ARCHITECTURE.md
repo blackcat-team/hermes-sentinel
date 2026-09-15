@@ -854,3 +854,66 @@ and no orchestration: D2 (external TCP reachability probe), D3 (host
 state resolver + debounce/hysteresis) and D4 (health engine
 orchestration) remain future stage D units and are deliberately
 absent here.
+
+## 19. External TCP reachability probe (Stage D2)
+
+Stage D2 adds exactly one bounded external evidence primitive
+(`hermes_sentinel.reachability`). It answers exactly one question —
+can Sentinel establish a TCP connection to the configured external
+target? — and nothing else. It does not decide
+HEALTHY / DEGRADED / DOWN.
+
+- **Evidence-only boundary**: `probe_tcp_reachability` returns only
+  `TcpReachability.REACHABLE` or `TcpReachability.UNREACHABLE` —
+  raw external evidence, never a host state and never a state
+  transition. REACHABLE never implies a healthy host and
+  UNREACHABLE never implies a down host: mapping evidence to host
+  state (weighing heartbeat freshness and confirmation counters) is
+  Stage D3 responsibility.
+- **Configuration**: the probe consumes only
+  `ExternalCheckSettings.tcp_host`, `tcp_port` and
+  `timeout_seconds`. `tcp_host` / `tcp_port` are passed verbatim to
+  the connection primitive — no lowercasing, stripping, URL parsing
+  or substitution; configuration validation stays owned by
+  `ExternalCheckSettings`. `down_confirmations` /
+  `recovery_confirmations` belong to D3 and are deliberately not
+  interpreted here.
+- **Standard primitive**: the sole network dependency is the Python
+  standard library `socket` module. `socket.create_connection` is
+  the only connection primitive; no third-party networking package
+  and no generic network abstraction framework exists.
+- **One probe per call**: one invocation performs exactly one
+  application-level `create_connection` call with the target
+  `(tcp_host, tcp_port)` and the configured `timeout_seconds` as
+  the connection timeout. `create_connection` may internally
+  consider multiple resolved addresses; that is still one logical
+  probe, and address iteration is never reimplemented locally.
+- **Success semantics**: a successful TCP connect is sufficient
+  evidence — no bytes are sent, no application protocol handshake
+  and no TLS handshake is performed, and no second timeout exists.
+  The opened socket is closed before the function returns
+  (deterministic resource cleanup).
+- **Failure semantics**: normal network failures of the `OSError`
+  family — connection refused, connect timeout
+  (`socket.timeout` / `TimeoutError`), name resolution failure
+  (`socket.gaierror`), network/host unreachable — map to
+  `UNREACHABLE` and are never leaked to D3/D4 callers as
+  exceptions.
+- **Error boundary**: only the `OSError` family is caught.
+  Unexpected non-network programming or runtime defects propagate
+  unchanged; `KeyboardInterrupt` / `SystemExit` are never swallowed
+  (no `BaseException` handling).
+- **No retry, no state**: no application-level retry loop, no
+  sleep/backoff, no confirmation counters (failure/success streaks
+  are D3 concerns), no memory between calls — one call is one
+  instantaneous logical observation. The probe never mutates the
+  settings object and never mutates global socket state
+  (`socket.setdefaulttimeout` is never called).
+- **No persistence / no incidents**: no SQLite access, no cached
+  probe state, no incident generation, no Telegram dependency.
+
+Out of scope for D2: host state resolution, debounce/hysteresis,
+`HostTransition` emission, health engine orchestration, incidents
+and Telegram (Stages D3, D4 and E). D3 (host state resolver +
+debounce/hysteresis) and D4 (health engine orchestration) remain
+future stage D units and are deliberately absent here.
