@@ -850,10 +850,11 @@ does not decide HEALTHY / DEGRADED / DOWN.
   never mutated and results are immutable.
 
 D1 owns no external TCP reachability probe, no debounce/hysteresis
-and no orchestration: D2 (external TCP reachability probe), D3 (host
-state resolver + debounce/hysteresis) and D4 (health engine
-orchestration) remain future stage D units and are deliberately
-absent here.
+and no orchestration: Stage D2 (external TCP reachability probe) now
+provides the external TCP reachability evidence, Stage D3 (host
+state resolver + debounce/hysteresis) now provides the pure
+host-state resolution in section 20 below, and Stage D4 (health
+engine orchestration) remains a future stage D unit.
 
 ## 19. External TCP reachability probe (Stage D2)
 
@@ -914,6 +915,89 @@ HEALTHY / DEGRADED / DOWN.
 
 Out of scope for D2: host state resolution, debounce/hysteresis,
 `HostTransition` emission, health engine orchestration, incidents
-and Telegram (Stages D3, D4 and E). D3 (host state resolver +
-debounce/hysteresis) and D4 (health engine orchestration) remain
-future stage D units and are deliberately absent here.
+and Telegram (Stages D3, D4 and E). D2 itself performs no host-state
+resolution and no orchestration; Stage D3 (host state resolver +
+debounce/hysteresis) now provides the pure state resolution in
+section 20 below, while Stage D4 (health engine orchestration)
+remains a future stage D unit, not implemented in D3.
+
+## 20. Host state resolver and hysteresis (Stage D3)
+
+Stage D3 adds the pure deterministic host-state state machine
+(`hermes_sentinel.state_resolver`). It consumes ONLY the
+already-computed D1/D2 evidence — `HeartbeatFreshness`,
+`ResourceAssessment`, `TcpReachability` — plus the explicit previous
+D3 resolution and the existing confirmation settings
+(`ExternalCheckSettings`). It performs no heartbeat calculation, no
+resource calculation, no TCP probing, no repository query and no
+wall-clock access.
+
+- **Pure resolution with explicit memory**: the public
+  `resolve_host_state(previous, freshness, resources, reachability,
+  settings)` is keyword-only and pure. `HostStateResolution` is BOTH
+  the current resolved `HostState` and the minimal explicit D3
+  memory (the bounded confirmation streaks `down_failures` /
+  `recovery_successes`) to feed into the next evaluation. It is an
+  immutable frozen slotted dataclass; invalid memory shapes (bool or
+  negative counters, a nonzero `down_failures` in DOWN, a nonzero
+  `recovery_successes` outside DOWN) fail closed with `ValueError`.
+  `previous=None` means first evaluation (no established state, both
+  streaks 0). There is no mutable module state and no hidden
+  cross-call memory.
+- **Base instantaneous state** (outside confirmed DOWN hysteresis):
+  HEALTHY iff heartbeat FRESH AND TCP REACHABLE AND no resource
+  threshold breached. Every other non-DOWN evidence combination is
+  DEGRADED (FRESH + REACHABLE + resource breach; MISSING/STALE +
+  REACHABLE; FRESH + UNREACHABLE). Resource issues never produce
+  DOWN.
+- **DOWN qualification**: a DOWN-confirmation observation is exactly
+  heartbeat MISSING or STALE (the lost-heartbeat qualifying family)
+  AND TCP UNREACHABLE. Resource state does not participate in DOWN
+  qualification.
+- **DOWN debounce**: while not in confirmed DOWN, each qualifying
+  observation increments the consecutive `down_failures` streak by
+  exactly 1; the state stays DEGRADED until exactly
+  `down_confirmations` consecutive qualifying observations confirm
+  DOWN on that evaluation (threshold equality confirms; the streak
+  resets to 0 once DOWN is confirmed). Any break of the combined
+  predicate (a FRESH heartbeat OR a REACHABLE probe) resets the
+  pending down streak to 0; alternating MISSING/STALE does not break
+  it while TCP stays UNREACHABLE.
+- **Confirmed DOWN hold**: once previous state is DOWN, D3 stays
+  DOWN until recovery hysteresis confirms. Heartbeat freshness alone
+  does NOT release confirmed DOWN; resource state alone does NOT
+  release confirmed DOWN. While DOWN: UNREACHABLE remains DOWN and
+  resets the recovery streak; REACHABLE increments the consecutive
+  `recovery_successes` streak by exactly 1.
+- **Recovery hysteresis**: exactly `recovery_confirmations`
+  consecutive REACHABLE TCP observations exit DOWN on the confirming
+  evaluation (threshold equality exits; both counters reset to 0).
+  A single UNREACHABLE observation resets the recovery streak to 0
+  while the host remains DOWN. Heartbeat or resource changes never
+  break a successful TCP streak.
+- **Recovery target**: the state after leaving DOWN is recomputed
+  from the CURRENT evidence via the base instantaneous rule —
+  FRESH + clear resources → HEALTHY; FRESH + resource breach →
+  DEGRADED; MISSING/STALE → DEGRADED.
+- **Settings consumption**: D3 consumes ONLY
+  `settings.down_confirmations` and `settings.recovery_confirmations`
+  (both `>= 1` by the existing config contract).
+  `tcp_host` / `tcp_port` / `timeout_seconds` belong to D2 and are
+  never read here.
+- **No transitions, no identity, no time**: D3 constructs no
+  `HostTransition` and carries no host name and no timestamp — it
+  has no clock and no host identity. D4 owns orchestration, the
+  per-host retention of previous D3 resolutions and transition
+  timestamp creation (comparing `previous.state` vs the new
+  resolution state at the confirmed engine evaluation time).
+- **Purity boundary**: no I/O, no socket, no persistence, no
+  logging, no environment reads, no clock calls, no mutable module
+  state; inputs are never mutated. D3 is deliberately not a runtime
+  manager: no engine/tracker/registry/scheduler/loop object exists
+  here — D4 owns runtime composition.
+
+Out of scope for D3: obtaining evidence (heartbeat/resource
+evaluation, TCP probing), per-host state retention, orchestration,
+`HostTransition` creation, incidents and Telegram (Stages D1, D2, D4
+and E). D4 (health engine orchestration) remains a future stage D
+unit and is deliberately absent here.

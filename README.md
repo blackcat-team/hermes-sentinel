@@ -10,9 +10,10 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage D2 (external TCP reachability probe) on
-top of the Stage D1 deterministic health signals core, the Stage C
-host reporter and the Stage B heartbeat pipeline.
+Initial development — Stage D3 (host state resolver +
+debounce/hysteresis) on top of the Stage D1/D2 health signal and
+reachability primitives, the Stage C host reporter and the Stage B
+heartbeat pipeline.
 
 Stage C is CLOSED in repository: the Stage C1 Linux telemetry
 collector, the Stage C2 HTTPS one-shot transport and the Stage C3
@@ -37,17 +38,31 @@ axis, and resource threshold breach signals
 (CPU/RAM/swap/disk/inodes/load5, equality is a breach, canonical
 breach order). It is a pure signal layer with no state decisions.
 
-Stage D2 adds the external TCP reachability evidence primitive
-(`src/hermes_sentinel/reachability.py`): one bounded probe that
-answers exactly "can Sentinel establish a TCP connection to the
-configured external target?" via the standard-library
-`socket.create_connection` with the configured
-`tcp_host`/`tcp_port`/`timeout_seconds`. It returns only
-REACHABLE / UNREACHABLE raw evidence: it does not decide
-HEALTHY/DEGRADED/DOWN, applies no debounce/hysteresis, keeps no
-probe state between calls and performs no retries. Host state
-resolution with debounce/hysteresis (D3) and health engine
-orchestration (D4) — the remaining Stage D units — are not started.
+Stage D2 is CLOSED_GREEN: the external TCP reachability evidence
+primitive (`src/hermes_sentinel/reachability.py`) — one bounded
+probe that answers exactly "can Sentinel establish a TCP connection
+to the configured external target?" via the standard-library
+`socket.create_connection`. It returns only REACHABLE / UNREACHABLE
+raw evidence with no state decisions, no debounce/hysteresis and no
+memory between calls.
+
+Stage D3 is the current stage: the pure deterministic host-state
+state machine (`src/hermes_sentinel/state_resolver.py`). It combines
+the already-computed D1/D2 evidence (heartbeat freshness, resource
+assessment, TCP reachability) with the explicit previous resolution
+and the existing confirmation settings into
+HEALTHY/DEGRADED/DOWN with debounce/hysteresis: HEALTHY iff fresh +
+reachable + resources clear outside DOWN hysteresis; DOWN requires
+MISSING/STALE heartbeat AND unreachable TCP confirmed by exactly
+`down_confirmations` consecutive qualifying observations; a
+confirmed DOWN is held until exactly `recovery_confirmations`
+consecutive REACHABLE probes (the recovery target is recomputed from
+current evidence). The immutable `HostStateResolution` is both the
+resolved state and the explicit memory fed into the next pure call —
+no engine, no per-host registry, no transitions, no clock and no I/O
+in D3. Health engine orchestration (D4) — evidence acquisition,
+per-host retention of previous resolutions and `HostTransition`
+emission — is not started.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
