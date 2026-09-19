@@ -1,0 +1,35 @@
+# Minimal canonical CI for Hermes Sentinel.
+#
+# Runs the repository-native canonical verification entrypoint
+# (tools/verify.py): exactly the five gates documented in
+# docs/DEVELOPMENT.md, in order, with no duplicated gate commands in
+# this file. The development dependencies come solely from
+# requirements-dev.txt. No deployment, no Telegram, no monitored-host
+# access, no secrets, no write permissions.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - stage-*
+      - infra-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Canonical verification
+        run: python tools/verify.py

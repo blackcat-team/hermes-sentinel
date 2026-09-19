@@ -20,7 +20,7 @@ from hermes_sentinel.config import (  # noqa: E402
     SentinelConfig,
     Thresholds,
 )
-from hermes_sentinel.domain import HostState
+from hermes_sentinel.domain import HostState  # noqa: E402
 
 
 def _heartbeat() -> HeartbeatSettings:

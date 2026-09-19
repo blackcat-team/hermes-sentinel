@@ -482,7 +482,7 @@ class SchemaFailClosedTest(PersistenceTestCase):
         """A v1 database without the canonical index is not ours."""
         path = self._path("missing-index.sqlite3")
         connection = connect(path)
-        connection.execute(f"DROP INDEX idx_heartbeat_node_received")
+        connection.execute("DROP INDEX idx_heartbeat_node_received")
         connection.commit()
         connection.close()
 
