@@ -33,6 +33,7 @@ import unittest
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 # src-layout bootstrap (same pattern as the other test modules).
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -92,7 +93,7 @@ RESOURCE_KEYS = {"used", "total", "percent"}
 LOAD_KEYS = {"one", "five", "fifteen"}
 REPORTED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 
-# --- real bash discovery (MSYS/Git Bash or WSL, never an install) -------
+# --- real bash discovery (native POSIX, MSYS/Git Bash or WSL) ------------
 
 
 def _bash_candidates() -> list[str]:
@@ -141,15 +142,33 @@ def _probe_bash(bash: str) -> str:
     return proc.stdout.strip()
 
 
+def _classify_bash(uname: str, host_os: str) -> str:
+    """Classify a probed bash for path handling.
+
+    ``uname`` is the probed ``uname -s`` output of the bash; ``host_os``
+    is the ``os.name`` of the Python test process driving it.  A bare
+    ``uname -s == Linux`` cannot distinguish native Linux bash from WSL
+    bash — both report ``Linux``.  The decisive context is the host of
+    the test process itself: WSL bash is only reachable from a
+    Windows-hosted (``nt``) Python, while a POSIX-hosted Python that
+    selected a Linux bash is running NATIVE bash whose paths are
+    already POSIX and must never be routed through ``wslpath``.
+    """
+    if "MINGW" in uname or "MSYS" in uname or "CYGWIN" in uname:
+        return "msys"
+    if "Linux" in uname:
+        return "wsl" if host_os == "nt" else "posix"
+    return ""
+
+
 def _discover_bash() -> tuple[str | None, str]:
     for candidate in _bash_candidates():
         uname = _probe_bash(candidate)
         if not uname:
             continue
-        if "MINGW" in uname or "MSYS" in uname or "CYGWIN" in uname:
-            return candidate, "msys"
-        if "Linux" in uname:
-            return candidate, "wsl"
+        flavor = _classify_bash(uname, os.name)
+        if flavor:
+            return candidate, flavor
     return None, ""
 
 
@@ -173,10 +192,18 @@ def _bash() -> str:
     return BASH
 
 
-def _bash_path(path: Path) -> str:
-    """Path form usable as a bash command argument."""
+def _bash_path(path: Path, flavor: str | None = None) -> str:
+    """Path form usable as a bash command argument.
+
+    ``flavor`` overrides the discovered ``BASH_FLAVOR`` (deterministic
+    helper-level testing).  Native POSIX bash receives native POSIX
+    paths untranslated; MSYS/Git Bash accepts the POSIX spelling of a
+    resolved Windows path; only actual WSL bash needs ``wslpath``
+    translation of the POSIX-spelled Windows path.
+    """
     resolved = path.resolve()
-    if BASH_FLAVOR == "msys":
+    active = BASH_FLAVOR if flavor is None else flavor
+    if active in ("msys", "posix"):
         return resolved.as_posix()
     key = str(resolved)
     if key in _WSL_PATH_CACHE:
@@ -313,6 +340,107 @@ class CollectorEnvironmentTest(unittest.TestCase):
         proc = _run_bash_code("uname -s")
         self.assertEqual(proc.returncode, 0)
         self.assertTrue(proc.stdout.strip())
+
+
+# --- bash flavor classification / path semantics (CI incident regression) --
+
+
+class BashFlavorSemanticsTest(unittest.TestCase):
+    """Deterministic helper-level proofs of the bash flavor contract.
+
+    Regression for the first GitHub Actions run: native Ubuntu bash
+    also reports ``uname -s == Linux``, and classifying it as WSL
+    routed native POSIX paths through ``wslpath`` (absent on the
+    runner), failing 109 tests.  Classification must therefore use the
+    test-process host context, and native POSIX paths must reach bash
+    untranslated.
+    """
+
+    _WSL_KEY = str(Path("E:/repo/scripts/sentinel-report.sh").resolve())
+
+    def setUp(self) -> None:
+        _WSL_PATH_CACHE.pop(self._WSL_KEY, None)
+        self.addCleanup(_WSL_PATH_CACHE.pop, self._WSL_KEY, None)
+
+    def test_native_linux_bash_on_posix_host_is_posix_not_wsl(self) -> None:
+        """The incident: a Linux-reporting bash driven by a POSIX-hosted
+        Python is NATIVE bash, never WSL."""
+        self.assertEqual(_classify_bash("Linux", "posix"), "posix")
+
+    def test_linux_bash_from_windows_host_is_wsl(self) -> None:
+        self.assertEqual(_classify_bash("Linux", "nt"), "wsl")
+
+    def test_msys_family_classifies_msys_on_both_hosts(self) -> None:
+        for uname in (
+            "MINGW64_NT-10.0-26200",
+            "MSYS_NT-10.0-26200",
+            "CYGWIN_NT-10.0-26200",
+        ):
+            for host_os in ("nt", "posix"):
+                self.assertEqual(_classify_bash(uname, host_os), "msys")
+
+    def test_unclassifiable_uname_is_rejected_fail_closed(self) -> None:
+        self.assertEqual(_classify_bash("Darwin", "posix"), "")
+        self.assertEqual(_classify_bash("", "nt"), "")
+
+    def test_discovered_flavor_matches_classifier_for_local_bash(self) -> None:
+        """The module-level discovery agrees with the classifier for the
+        bash actually selected on this machine (msys here, posix on the
+        GitHub Actions Linux runner)."""
+        if BASH is None:
+            self.skipTest("no real bash discovered on this machine")
+        self.assertEqual(
+            BASH_FLAVOR, _classify_bash(_probe_bash(_bash()), os.name)
+        )
+
+    def test_posix_flavor_passes_path_through_with_no_translator(self) -> None:
+        """Native POSIX path handling performs ZERO subprocess work — no
+        wslpath, no cygpath — and the path reaches bash in its resolved
+        POSIX spelling (on a Linux host: byte-identical native path)."""
+
+        def forbidden(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError(
+                "posix flavor must not invoke any path-translator subprocess"
+            )
+
+        native = Path(
+            "/home/runner/work/hermes-sentinel/hermes-sentinel"
+            "/scripts/sentinel-report.sh"
+        )
+        with mock.patch.object(subprocess, "run", side_effect=forbidden):
+            converted = _bash_path(native, flavor="posix")
+        self.assertEqual(converted, native.resolve().as_posix())
+        self.assertNotIn("\\", converted)
+
+    def test_msys_flavor_keeps_posix_drive_spelling(self) -> None:
+        """Existing MSYS contract preserved: the POSIX spelling of the
+        resolved (Windows) path, exactly as before the fix."""
+        self.assertEqual(
+            _bash_path(SCRIPT, flavor="msys"), SCRIPT.resolve().as_posix()
+        )
+
+    def test_wsl_flavor_still_translates_via_wslpath_subprocess(self) -> None:
+        """Existing WSL contract preserved: the wsl branch routes the
+        POSIX-spelled Windows path through a real ``wslpath`` invocation
+        of the discovered bash (captured here, never executed) and
+        caches the translation."""
+        source = Path("E:/repo/scripts/sentinel-report.sh")
+        converted = "/mnt/e/repo/scripts/sentinel-report.sh"
+        fake = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=converted + "\n", stderr=""
+        )
+        with mock.patch.object(
+            subprocess, "run", return_value=fake
+        ) as runner:
+            first = _bash_path(source, flavor="wsl")
+            second = _bash_path(source, flavor="wsl")
+        self.assertEqual(first, converted)
+        self.assertEqual(second, converted)
+        runner.assert_called_once()  # the second call hits the cache
+        argv = runner.call_args.args[0]
+        self.assertEqual(argv[0], _bash())
+        self.assertIn("wslpath", argv[-1])
+        self.assertIn(source.resolve().as_posix(), argv[-1])
 
 
 # --- success contract + B3 oracle ----------------------------------------
