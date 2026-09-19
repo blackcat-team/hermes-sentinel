@@ -854,7 +854,8 @@ and no orchestration: Stage D2 (external TCP reachability probe) now
 provides the external TCP reachability evidence, Stage D3 (host
 state resolver + debounce/hysteresis) now provides the pure
 host-state resolution in section 20 below, and Stage D4 (health
-engine orchestration) remains a future stage D unit.
+engine orchestration) now provides the runtime composition in
+section 21 below.
 
 ## 19. External TCP reachability probe (Stage D2)
 
@@ -918,8 +919,8 @@ Out of scope for D2: host state resolution, debounce/hysteresis,
 and Telegram (Stages D3, D4 and E). D2 itself performs no host-state
 resolution and no orchestration; Stage D3 (host state resolver +
 debounce/hysteresis) now provides the pure state resolution in
-section 20 below, while Stage D4 (health engine orchestration)
-remains a future stage D unit, not implemented in D3.
+section 20 below, while Stage D4 (health engine orchestration) now
+provides the runtime composition in section 21 below.
 
 ## 20. Host state resolver and hysteresis (Stage D3)
 
@@ -999,5 +1000,84 @@ wall-clock access.
 Out of scope for D3: obtaining evidence (heartbeat/resource
 evaluation, TCP probing), per-host state retention, orchestration,
 `HostTransition` creation, incidents and Telegram (Stages D1, D2, D4
-and E). D4 (health engine orchestration) remains a future stage D
-unit and is deliberately absent here.
+and E). D4 (health engine orchestration) owns exactly those runtime
+composition concerns and is documented in section 21 below; it
+remains deliberately absent from the pure D3 resolver.
+
+## 21. Health engine orchestration (Stage D4)
+
+Stage D4 adds the bounded orchestration layer
+(`hermes_sentinel.health_engine`) that composes the frozen D1/D2/D3
+contracts and the B1 repository read into one deterministic per-host
+health evaluation. It re-opens none of the lower contracts: D1/D2/D3
+functions are called verbatim as the source of truth, and no
+freshness, breach, probe or hysteresis logic is duplicated here.
+
+- **Public result**: `HostHealthEvaluation` is an immutable frozen
+  slotted dataclass carrying the evaluated `host`, the single
+  validated `evaluated_at` clock moment, the propagated D1
+  `freshness` (`HeartbeatFreshnessResult`), the propagated D1
+  `resources` (`ResourceAssessment` or `None`), the propagated D2
+  `reachability` (`TcpReachability`), the propagated D3
+  `resolution` (`HostStateResolution`) and the optional confirmed
+  `transition` (`HostTransition` or `None`).
+- **Engine**: `HealthEngine(config, repository, clock=utc_now)` with
+  one public operation `evaluate_host(host)`. The accepted B2
+  central clock (`hermes_sentinel.ingestion.utc_now` /
+  `Clock`) is the default injectable time authority.
+- **Exact evaluation order** (normative, one full evaluation per
+  call): (1) the host must be configured — otherwise
+  `UnknownHostError` before any clock, repository or TCP activity;
+  (2) the clock is called exactly once; (3) the clock result must be
+  a truly timezone-aware `datetime` — otherwise
+  `InvalidClockResultError` before any repository read (never
+  silently coerced); (4) `repository.latest_heartbeat(host)` is
+  called exactly once — the ONLY repository access, D4 never
+  writes; (5) D1 freshness is evaluated against the single clock
+  moment; (6) with a heartbeat the D1 resource assessment is
+  computed and used both publicly and internally, without one the
+  public `resources` is `None` while the D3 resolver receives the
+  neutral non-degrading `ResourceAssessment(breaches=())` input it
+  requires (resources never participate in DOWN qualification, so
+  absent telemetry can invent neither DEGRADED-with-cause nor
+  DOWN); (7) exactly one D2 TCP probe supplies the reachability
+  evidence; (8) the D3 resolver resolves the new state from the
+  evidence plus the previously remembered per-host resolution; (9)
+  a transition is created only when DOWN was entered or left; (10)
+  the complete immutable evaluation is constructed; (11) ONLY then
+  is the new resolution committed to the per-host memory; (12) the
+  result is returned.
+- **Errors**: `HealthEngineError` is the bounded base;
+  `UnknownHostError` and `InvalidClockResultError` subclass it and
+  are distinct from the accepted B2 ingestion errors. Lower-layer
+  exceptions (for example the D1 fail-closed `ValueError` on
+  inconsistent clock evidence, repository failures or non-network
+  probe defects) propagate unchanged — there is no broad
+  exception-wrapping hierarchy.
+- **Transitions**: emitted ONLY when an established previous
+  resolution is entered or left by DOWN on this evaluation, stamped
+  `at` the confirming evaluation's clock moment. The first
+  evaluation of a host never emits — even when the initial resolved
+  state is DOWN — and ordinary HEALTHY <-> DEGRADED changes never
+  emit. D3 hysteresis semantics (the DOWN debounce, the confirmed
+  DOWN hold and the recovery streak) remain authoritative and are
+  never reimplemented here.
+- **Process-local per-host memory**: the engine remembers only the
+  last fully committed `HostStateResolution` per host. The commit
+  is all-or-nothing from the engine's point of view: any failure
+  before successful result construction (clock validation,
+  repository read, freshness/resource assessment, TCP probe,
+  resolver execution, result construction) leaves the previously
+  remembered per-host resolution exactly intact. A process restart
+  naturally resets every host to `previous=None`; nothing is
+  persisted.
+- **Read-only persistence boundary**: D4 performs no SQLite writes,
+  no `latest_received_at` updates, no schema changes and no
+  incident/notification records. The usage model is the B-stage
+  single service thread (`HealthEngine`, like
+  `HeartbeatRepository`, is not thread-safe).
+
+Out of scope for D4: incidents, Telegram delivery,
+scheduler/polling loops, service monitoring, retries/backoff,
+HTTP endpoints, remote remediation (SSH/shell/systemctl/reboot)
+and any new persistence (Stages E, F, H, I).

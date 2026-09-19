@@ -10,10 +10,10 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage D3 (host state resolver +
-debounce/hysteresis) on top of the Stage D1/D2 health signal and
-reachability primitives, the Stage C host reporter and the Stage B
-heartbeat pipeline.
+Initial development — Stage D4 (health engine orchestration) on top
+of the Stage D1/D2/D3 health signal, reachability and state-resolver
+primitives, the Stage C host reporter and the Stage B heartbeat
+pipeline.
 
 Stage C is CLOSED in repository: the Stage C1 Linux telemetry
 collector, the Stage C2 HTTPS one-shot transport and the Stage C3
@@ -46,9 +46,9 @@ to the configured external target?" via the standard-library
 raw evidence with no state decisions, no debounce/hysteresis and no
 memory between calls.
 
-Stage D3 is the current stage: the pure deterministic host-state
-state machine (`src/hermes_sentinel/state_resolver.py`). It combines
-the already-computed D1/D2 evidence (heartbeat freshness, resource
+Stage D3 is CLOSED_GREEN: the pure deterministic host-state state
+machine (`src/hermes_sentinel/state_resolver.py`). It combines the
+already-computed D1/D2 evidence (heartbeat freshness, resource
 assessment, TCP reachability) with the explicit previous resolution
 and the existing confirmation settings into
 HEALTHY/DEGRADED/DOWN with debounce/hysteresis: HEALTHY iff fresh +
@@ -60,9 +60,28 @@ consecutive REACHABLE probes (the recovery target is recomputed from
 current evidence). The immutable `HostStateResolution` is both the
 resolved state and the explicit memory fed into the next pure call —
 no engine, no per-host registry, no transitions, no clock and no I/O
-in D3. Health engine orchestration (D4) — evidence acquisition,
-per-host retention of previous resolutions and `HostTransition`
-emission — is not started.
+in D3.
+
+Stage D4 is the current stage: the bounded health engine
+orchestrator (`src/hermes_sentinel/health_engine.py`).
+`HealthEngine.evaluate_host(host)` composes the frozen D1/D2/D3
+contracts and the B1 repository read into one immutable
+`HostHealthEvaluation` per call, in exactly the documented order:
+configured-host check (`UnknownHostError` before any activity), one
+central clock call validated as truly timezone-aware
+(`InvalidClockResultError` otherwise, never coerced), exactly one
+`latest_heartbeat` read (D4 never writes), D1 freshness, D1
+resources (public `resources=None` when no heartbeat exists — the
+D3 resolver internally receives the neutral non-degrading input),
+exactly one D2 TCP probe, D3 resolution against the remembered
+per-host previous resolution, and a `HostTransition` ONLY when DOWN
+is entered or left (first evaluation never emits; ordinary
+HEALTHY <-> DEGRADED changes never emit). The per-host resolver
+memory is process-local and committed only after the entire
+evaluation succeeds — any failure leaves the remembered state
+exactly intact, and a restart resets every host. Incidents,
+Telegram delivery, schedulers/polling and any new persistence
+remain future roadmap units.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
