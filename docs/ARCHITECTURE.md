@@ -1081,3 +1081,44 @@ Out of scope for D4: incidents, Telegram delivery,
 scheduler/polling loops, service monitoring, retries/backoff,
 HTTP endpoints, remote remediation (SSH/shell/systemctl/reboot)
 and any new persistence (Stages E, F, H, I).
+
+## 22. Incident core (Stage E1)
+
+Stage E1 adds the pure incident domain layer
+(`hermes_sentinel.incidents`). It projects the already-frozen
+Stage D `HostTransition` contract onto the incident vocabulary
+consumed by later Stage E units — nothing else. It performs no
+deduplication or flap suppression, persists nothing, formats no
+messages and delivers nothing.
+
+- **Incident kinds**: exactly `IncidentKind.DOWN` (`"down"`, a DOWN
+  event: any transition into DOWN) and `IncidentKind.RECOVERED`
+  (`"recovered"`, a RECOVERED event: any transition out of DOWN).
+  No other incident kind exists in the MVP.
+- **Canonical shape**: `Incident` is an immutable frozen slotted
+  dataclass holding exactly `kind` and `transition`. The original
+  `HostTransition` is the single canonical source of `host`, `at`,
+  `from_state` and `to_state`; none of them is duplicated into
+  independent fields. Read-only convenience properties are allowed
+  only as direct projections of the transition, and `Incident`
+  never re-validates what `HostTransition` already guarantees.
+- **Mapping**: `incident_from_transition(transition)` is a pure
+  deterministic projection returning `Incident | None`. A DOWN
+  event maps to `Incident(IncidentKind.DOWN, transition)`; a
+  RECOVERED event maps to `Incident(IncidentKind.RECOVERED,
+  transition)`; every other valid `HostTransition` — the ordinary
+  `HEALTHY <-> DEGRADED` changes, never emitted by D4 — maps to
+  `None` and is deliberately non-exceptional (no `ValueError`).
+- **Fail-closed manual construction**: building an `Incident`
+  directly is valid only when the requested `kind` agrees with the
+  transition event family — `IncidentKind.DOWN` requires
+  `transition.is_down_event`, `IncidentKind.RECOVERED` requires
+  `transition.is_recovery_event`. Contradictory combinations raise
+  `ValueError`.
+- **Purity**: no I/O, no networking, no persistence, no logging, no
+  wall-clock reads, no environment reads, no mutable module state.
+
+Out of scope for E1: incident persistence/deduplication, flap
+suppression, message formatting/rendering, Telegram transport,
+retries/backoff, message queueing and notification records (later
+Stage E and F concerns).

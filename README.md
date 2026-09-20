@@ -10,10 +10,9 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage D4 (health engine orchestration) on top
-of the Stage D1/D2/D3 health signal, reachability and state-resolver
-primitives, the Stage C host reporter and the Stage B heartbeat
-pipeline.
+Initial development — Stage E (incidents + Telegram) on top of the
+Stage D health engine, the Stage C host reporter and the Stage B
+heartbeat pipeline.
 
 Stage C is CLOSED in repository: the Stage C1 Linux telemetry
 collector, the Stage C2 HTTPS one-shot transport and the Stage C3
@@ -62,8 +61,7 @@ resolved state and the explicit memory fed into the next pure call —
 no engine, no per-host registry, no transitions, no clock and no I/O
 in D3.
 
-Stage D4 is the current stage: the bounded health engine
-orchestrator (`src/hermes_sentinel/health_engine.py`).
+Stage D4 is CLOSED_GREEN: the bounded health engine
 `HealthEngine.evaluate_host(host)` composes the frozen D1/D2/D3
 contracts and the B1 repository read into one immutable
 `HostHealthEvaluation` per call, in exactly the documented order:
@@ -79,9 +77,20 @@ is entered or left (first evaluation never emits; ordinary
 HEALTHY <-> DEGRADED changes never emit). The per-host resolver
 memory is process-local and committed only after the entire
 evaluation succeeds — any failure leaves the remembered state
-exactly intact, and a restart resets every host. Incidents,
-Telegram delivery, schedulers/polling and any new persistence
-remain future roadmap units.
+exactly intact, and a restart resets every host. Stage D is
+CLOSED_GREEN.
+
+Stage E has started. E1 Incident Core is the current stage: the
+pure incident domain layer (`src/hermes_sentinel/incidents.py`)
+projecting the frozen Stage D `HostTransition` onto the incident
+vocabulary — a DOWN event (any transition into DOWN) maps to
+`IncidentKind.DOWN`, a RECOVERED event (any transition out of
+DOWN) maps to `IncidentKind.RECOVERED`, and ordinary
+`HEALTHY <-> DEGRADED` changes map to `None`. The immutable
+`Incident` wraps the canonical `HostTransition` directly and
+duplicates none of its facts. Telegram delivery is NOT implemented
+yet, and no incident persistence or runtime evaluation loop exists
+yet — those are later Stage E/F roadmap units.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
