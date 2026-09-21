@@ -98,22 +98,39 @@ secret-safe `TelegramDeliveryError` failures, redirects refused, no
 retries, HTTP 200 + `"ok": true` required for success, no
 `getUpdates`.
 
-Stage E3 is the current stage: the bounded notification coordinator
-(`src/hermes_sentinel/notifications.py`) now exists in this
-candidate, only as a thin composition layer. One confirmed D4
-`HostTransition` goes in, the E1 `incident_from_transition()` mapper
-stays the sole incident-classification authority, and an
-incident-worthy transition reaches the injected sender — any object
-structurally satisfying the minimal `IncidentSender.send(incident)`
-protocol, which the E2 `TelegramSender` does unmodified — exactly
-once. A successful send returns that exact same `Incident`; a sender
-failure propagates unchanged with no retry, no dedupe and no
-persistence, and the coordinator owns no transport, health
-evaluation, configuration loading or state. Periodic health
-evaluation, the all-host runtime loop and configuration wiring
-(including Telegram settings loading) are still NOT implemented:
-those are later Stage E/F roadmap units. Stage E is not complete and
-the MVP is not complete.
+Stage E3 is CLOSED_GREEN: the bounded notification coordinator
+(`src/hermes_sentinel/notifications.py`) exists as a thin composition
+layer. One confirmed D4 `HostTransition` goes in, the E1
+`incident_from_transition()` mapper stays the sole
+incident-classification authority, and an incident-worthy transition
+reaches the injected sender — any object structurally satisfying the
+minimal `IncidentSender.send(incident)` protocol, which the E2
+`TelegramSender` does unmodified — exactly once. A successful send
+returns that exact same `Incident`; a sender failure propagates
+unchanged with no retry, no dedupe and no persistence, and the
+coordinator owns no transport, health evaluation, configuration
+loading or state.
+
+Stage E4 is the current stage: the minimal synchronous one-shot
+monitoring cycle (`src/hermes_sentinel/monitoring.py`) now exists in
+this candidate. `MonitoringCycle(config, engine, coordinator).run()`
+iterates the configured hosts in `SentinelConfig.hosts` tuple order,
+evaluates each host exactly once through the accepted D4
+`HealthEngine.evaluate_host`, passes each exact
+`evaluation.transition` to the accepted E3
+`NotificationCoordinator.notify_transition` exactly once, and returns
+an ordered tuple of immutable `HostMonitoringResult` values pairing
+each exact evaluation with the exact `Incident | None` the
+coordinator returned (object identity preserved; a `None` transition
+stays `None`). An empty host configuration is a valid no-op. Failures
+are deliberately simple: an exception from the engine or coordinator
+propagates unchanged and the remaining hosts of that run are not
+processed — no retry, no backoff, no error swallowing. The
+long-running daemon/runtime loop, scheduling/polling, the central
+Sentinel systemd unit, configuration/Telegram settings wiring and
+production hardening are still NOT implemented: those are later Stage
+E/F roadmap units. Stage E is not complete and the MVP is not
+complete.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

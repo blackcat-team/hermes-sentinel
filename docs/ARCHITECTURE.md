@@ -1288,3 +1288,62 @@ transition -> incident -> sender composition.
   systemd central Sentinel unit, configuration/Telegram settings
   wiring, Telegram polling/webhooks and Hermes Agent integration are
   later Stage E/F units.
+
+## 25. One-shot monitoring cycle (Stage E4)
+
+Stage E4 adds the minimal synchronous runtime composition
+(`hermes_sentinel.monitoring`) that connects the already-frozen D4
+engine to the already-frozen E3 coordinator for every configured
+host. One object, one operation:
+
+    SentinelConfig.hosts (configured tuple order)
+                |
+    MonitoringCycle(config, engine, coordinator).run()
+                |  HealthEngine.evaluate_host(host.name)      (D4, once)
+                |  NotificationCoordinator.notify_transition(   (E3, once)
+                |      evaluation.transition)
+                |
+    tuple[HostMonitoringResult, ...] (host order preserved)
+
+- **Injection only**: the cycle takes the already-constructed
+  `SentinelConfig`, `HealthEngine` and `NotificationCoordinator`. It
+  owns no configuration loading, no environment/file access, no
+  Telegram settings loading and no sender construction of any kind.
+- **One pass per run**: `run()` iterates the configured hosts in
+  exactly the `SentinelConfig.hosts` tuple order; each host is
+  evaluated exactly once through `HealthEngine.evaluate_host(host.name)`
+  and nothing else. No host is evaluated twice in one run, and no
+  duplicate transition classification or notification mapping exists
+  — those authorities stay entirely in the injected collaborators.
+- **Exact transition pass-through**: the exact `evaluation.transition`
+  object is handed to `NotificationCoordinator.notify_transition`
+  exactly once per host. A `None` transition stays `None` — E4 never
+  invents incidents, re-decides incident-worthiness or duplicates the
+  E1 mapping decision.
+- **Ordered immutable results**: the return value is a tuple of
+  `HostMonitoringResult` values in the configured host order, each
+  pairing the exact `HostHealthEvaluation` object with the exact
+  `Incident | None` the coordinator returned — object identity
+  preserved, never copied, revalidated or reconstructed.
+- **Empty configuration is a valid no-op**: zero configured hosts
+  produces zero engine calls, zero coordinator calls and an empty
+  tuple back.
+- **Deliberately simple failure semantics**: no retry, no backoff, no
+  exception translation, no error swallowing. An exception from the
+  engine or the coordinator propagates unchanged, the partially
+  collected results of the failed run are not returned, and no later
+  host of that run is processed. E4 defines no production-hardening
+  or failure-isolation policy (Stage F concerns).
+- **No hidden state**: beyond the injected collaborators the cycle
+  keeps nothing — no per-host registry (the D4 engine already owns
+  the per-host resolver memory), no run counters, no delivered-event
+  memory. Consecutive `run()` calls are independent full passes; the
+  cycle performs no persistence of any kind.
+
+Out of scope for E4: polling/scheduling, sleep loops, asyncio,
+threads, daemon/service lifecycle, the central Sentinel systemd unit,
+environment/config-file loaders, Telegram credential/settings
+loading, construction of `TelegramSender` from environment,
+retries/backoff, queueing, dedupe/flap suppression, new
+persistence/schema, service monitoring, Hermes integration, remote
+remediation, deployment (later Stage E/F units).
