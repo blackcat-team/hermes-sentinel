@@ -111,9 +111,8 @@ unchanged with no retry, no dedupe and no persistence, and the
 coordinator owns no transport, health evaluation, configuration
 loading or state.
 
-Stage E4 is the current stage: the minimal synchronous one-shot
-monitoring cycle (`src/hermes_sentinel/monitoring.py`) now exists in
-this candidate. `MonitoringCycle(config, engine, coordinator).run()`
+Stage E4 is CLOSED_GREEN: the minimal synchronous one-shot
+monitoring cycle (`src/hermes_sentinel/monitoring.py`). `MonitoringCycle(config, engine, coordinator).run()`
 iterates the configured hosts in `SentinelConfig.hosts` tuple order,
 evaluates each host exactly once through the accepted D4
 `HealthEngine.evaluate_host`, passes each exact
@@ -125,11 +124,31 @@ coordinator returned (object identity preserved; a `None` transition
 stays `None`). An empty host configuration is a valid no-op. Failures
 are deliberately simple: an exception from the engine or coordinator
 propagates unchanged and the remaining hosts of that run are not
-processed — no retry, no backoff, no error swallowing. The
-long-running daemon/runtime loop, scheduling/polling, the central
-Sentinel systemd unit, configuration/Telegram settings wiring and
-production hardening are still NOT implemented: those are later Stage
-E/F roadmap units. Stage E is not complete and the MVP is not
+processed — no retry, no backoff, no error swallowing.
+
+Stage E5 is the current stage: the single-threaded cooperative
+central runtime loop (`src/hermes_sentinel/runtime.py`) now exists in
+this candidate. `SentinelRuntime(heartbeat_server, monitoring_cycle,
+monitor_interval_seconds, monotonic=...,
+poll_interval_seconds=...).run_forever(should_stop=...)` lets ONE
+thread serve the accepted B5 serial heartbeat server through its
+standard one-request `handle_request()` mechanism while running the
+accepted E4 `MonitoringCycle.run()` on an injected monotonic
+schedule: the first cycle is due immediately, the next is anchored to
+each cycle's completion time (a long delay performs exactly one
+cycle — no catch-up bursts), at most one heartbeat request is
+serviced per cooperative iteration, and the accept-wait timeout is
+clamped to be non-negative and never above the poll interval or the
+remaining time to the next cycle — so continuous heartbeat traffic
+cannot starve monitoring. Interval values are validated fail-fast; a
+stop predicate is injectable for deterministic tests and later
+lifecycle wiring (no signal handling yet); exceptions propagate
+unchanged with no retry. All collaborators are injected — the
+runtime constructs nothing and closes nothing. The application
+composition root (configuration/environment/Telegram settings
+wiring), the central Sentinel systemd unit, production service
+packaging and hardening are still NOT implemented: those are later
+Stage E/F roadmap units. Stage E is not complete and the MVP is not
 complete.
 
 Stage B5 is a plaintext backend listener

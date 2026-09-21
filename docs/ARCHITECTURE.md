@@ -1347,3 +1347,98 @@ loading, construction of `TelegramSender` from environment,
 retries/backoff, queueing, dedupe/flap suppression, new
 persistence/schema, service monitoring, Hermes integration, remote
 remediation, deployment (later Stage E/F units).
+
+## 26. Single-threaded cooperative central runtime loop (Stage E5)
+
+Stage E5 adds the minimal long-running composition
+(`hermes_sentinel.runtime`) that lets ONE thread serve the frozen B5
+serial heartbeat HTTP server while periodically executing the frozen
+E4 `MonitoringCycle` — reopening neither contract and adding no
+background concurrency of any kind:
+
+    SentinelRuntime(server, cycle, interval).run_forever(should_stop)
+                |
+    one cooperative iteration (the same thread, until stop or failure):
+                |
+    1. stop predicate check            (bounded loop boundary)
+    2. schedule check on the injected monotonic clock:
+       MonitoringCycle.run() when due — exactly once, then
+       next due = post-completion monotonic reading + interval
+    3. server.timeout = min(poll_interval_seconds,
+                            remaining time to next due)  (never < 0)
+    4. server.handle_request()        (at most ONE heartbeat request)
+                |
+    back to 1
+
+- **Injection only / no ownership**: the runtime constructs nothing —
+  no HTTP server, no SQLite/repositories, no `HealthEngine`, no
+  `MonitoringCycle`, no `TelegramSender`, no
+  `NotificationCoordinator`, no configuration, environment or secrets
+  loading. The heartbeat server, the monitoring cycle, the monotonic
+  clock and the stop predicate are all injected; the caller retains
+  ownership of resource construction and final cleanup. The runtime
+  never calls `server_close()` and owns no process-signal handling,
+  no daemonization and no systemd lifecycle.
+- **Single-threaded by construction**: no threads, no
+  `ThreadingHTTPServer`, no asyncio, no multiprocessing, no background
+  workers, no executors. The B5 server is driven only through its
+  standard one-request `handle_request()` mechanism (`serve_forever`
+  is never the runtime strategy, because monitoring must be
+  interleaved cooperatively in the same thread), preserving the
+  repository's single-thread / non-thread-safe persistence boundary.
+  Every B5 request parsing, routing, framing and adapter semantic
+  stays exactly as accepted.
+- **Cooperative schedule**: the first monitoring cycle is due
+  immediately when `run_forever` starts and runs before the first
+  heartbeat accept wait. After a successful cycle the next due time
+  is the post-completion monotonic reading plus
+  `monitor_interval_seconds` (completion-anchored) — or, when that
+  sum is not representably later than the completion reading (an
+  interval below one float ULP at a very large clock value, where
+  ordinary addition collapses), the next representable float — so a
+  cycle is never scheduled at an unchanged clock instant. Missed
+  time never creates catch-up bursts: a delayed iteration performs
+  exactly one cycle and reschedules from that completion — never
+  several back-to-back cycles.
+- **No starvation, one request per iteration**: between schedule
+  checks at most one heartbeat request is serviced via
+  `handle_request()`; after every handled request control returns to
+  the schedule check, and a due cycle runs before the next accept
+  wait. Continuous incoming heartbeat traffic therefore cannot starve
+  monitoring.
+- **Bounded accept wait**: before every `handle_request()` the
+  server's standard accept-wait timeout (`server.timeout`, the
+  attribute the stdlib one-request mechanism respects when the
+  listening socket carries no timeout of its own) is set to a
+  non-negative value that is never larger than BOTH
+  `poll_interval_seconds` and the remaining time to the next
+  monitoring due point. Heartbeat waiting can never outrun the
+  schedule, and stop checks stay bounded by the poll interval.
+- **Fail-fast interval validation**: `monitor_interval_seconds` and
+  `poll_interval_seconds` must each be finite and strictly positive;
+  any other value raises `ValueError` at construction and is never
+  silently coerced.
+- **Stop contract**: `run_forever(should_stop=...)` takes a small
+  injectable stop predicate (for deterministic tests and later
+  lifecycle wiring); the default predicate never requests stop. If
+  stop is already requested before work starts, the call returns
+  with zero monitoring calls, zero HTTP request handling and zero
+  monotonic clock access — the initial stop boundary precedes the
+  first schedule access; otherwise stop is checked at every bounded
+  loop boundary. E5 adds no signal handling and no systemd-specific
+  lifecycle logic — the runtime does not own process signals.
+- **Deliberately simple failure semantics**: no retry, no backoff, no
+  exception translation, no exception swallowing, no per-host
+  isolation, no delivery recovery queues. An exception from
+  `MonitoringCycle.run()`, `heartbeat_server.handle_request()` or
+  the injected monotonic/stop collaborators propagates unchanged, and
+  the loop exits naturally through that propagation. Production
+  resilience belongs to later hardening.
+
+Out of scope for E5: configuration file/environment parsing, Telegram
+bot-token/settings loading, the full application composition root,
+the central Sentinel systemd unit, TLS termination, reverse proxy
+configuration, logging/metrics, retry/backoff, queues, incident
+persistence, dedupe/flap suppression, new database schema, service
+monitoring, Hermes integration, remote remediation, deployment and
+Stage F production hardening.
