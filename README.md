@@ -89,18 +89,31 @@ ordinary `HEALTHY <-> DEGRADED` changes map to `None`. The immutable
 `Incident` wraps the canonical `HostTransition` directly and
 duplicates none of its facts.
 
-Stage E2 is the current stage: the bounded Telegram sender primitive
-(`src/hermes_sentinel/telegram.py`) now exists in this candidate. It
-renders the accepted E1 `Incident` as one deterministic plain-text
-message and performs exactly one outbound Telegram Bot API
-`sendMessage` POST to the fixed `https://api.telegram.org` origin
-with a sender-only bot — secret-safe `TelegramDeliveryError`
-failures, redirects refused, no retries, HTTP 200 + `"ok": true`
-required for success, no `getUpdates`. Runtime
-evaluation/notification orchestration — the periodic health loop,
-incident persistence, deduplication and delivery scheduling — is
-still NOT implemented: those are later Stage E/F roadmap units.
-Stage E is not complete and the MVP is not complete.
+Stage E2 is CLOSED_GREEN: the bounded Telegram sender primitive
+(`src/hermes_sentinel/telegram.py`) renders the accepted E1
+`Incident` as one deterministic plain-text message and performs
+exactly one outbound Telegram Bot API `sendMessage` POST to the
+fixed `https://api.telegram.org` origin with a sender-only bot —
+secret-safe `TelegramDeliveryError` failures, redirects refused, no
+retries, HTTP 200 + `"ok": true` required for success, no
+`getUpdates`.
+
+Stage E3 is the current stage: the bounded notification coordinator
+(`src/hermes_sentinel/notifications.py`) now exists in this
+candidate, only as a thin composition layer. One confirmed D4
+`HostTransition` goes in, the E1 `incident_from_transition()` mapper
+stays the sole incident-classification authority, and an
+incident-worthy transition reaches the injected sender — any object
+structurally satisfying the minimal `IncidentSender.send(incident)`
+protocol, which the E2 `TelegramSender` does unmodified — exactly
+once. A successful send returns that exact same `Incident`; a sender
+failure propagates unchanged with no retry, no dedupe and no
+persistence, and the coordinator owns no transport, health
+evaluation, configuration loading or state. Periodic health
+evaluation, the all-host runtime loop and configuration wiring
+(including Telegram settings loading) are still NOT implemented:
+those are later Stage E/F roadmap units. Stage E is not complete and
+the MVP is not complete.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

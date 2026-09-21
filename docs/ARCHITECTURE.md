@@ -1224,3 +1224,67 @@ persistence.
   all-host loop, incident persistence, deduplication/flap
   suppression, delivery scheduling/queueing and the asyncio daemon
   are later Stage E/F units; E2 is only the sender primitive.
+
+## 24. Notification coordinator (Stage E3)
+
+Stage E3 adds the bounded notification coordinator
+(`hermes_sentinel.notifications`). It is the deliberately thin
+bridge connecting the already-frozen contracts: one confirmed Stage
+D4 `HostTransition` goes in, the accepted Stage E1 mapper
+`incident_from_transition()` decides incident-worthiness, and an
+incident-worthy transition is handed to an injected sender exactly
+once. E3 owns no network transport, no health evaluation, no runtime
+loop, no configuration loading and no persistence — it is only the
+transition -> incident -> sender composition.
+
+- **Sender protocol**: the minimal structural `IncidentSender`
+  protocol declares exactly one member, `send(incident) -> None`,
+  with no return value and no transport-specific fields, methods or
+  error types. Quiet return means delivered; any raised exception
+  means the delivery failed. The Stage E2 `TelegramSender` satisfies
+  it structurally without any modification to `telegram.py`, and any
+  future transport can do the same.
+- **E1 remains the sole authority**: the coordinator never re-decides
+  which transitions are incident-worthy. It calls
+  `incident_from_transition(transition)` exactly once per
+  non-`None` transition and obeys the mapper's verdict verbatim.
+- **None transitions cause no delivery**: `notify_transition(None)`
+  returns `None` without calling the mapper and without calling the
+  sender.
+- **Non-incident transitions cause no delivery**: when E1 maps the
+  transition to `None` (ordinary `HEALTHY <-> DEGRADED` changes), the
+  coordinator returns `None` and the sender is never invoked.
+- **Exactly one sender invocation**: an incident-worthy transition
+  causes exactly one `sender.send(incident)` call — one mapping call,
+  one send call, never a second of either.
+- **Successful send returns the same Incident**: only after
+  `sender.send()` returns quietly does `notify_transition()` return,
+  and it returns that exact same `Incident` object — never a copy or
+  reconstruction.
+- **Sender failure propagates unchanged**: an exception raised by the
+  sender escapes as the original exception object — never wrapped,
+  replaced or special-cased (not even `TelegramDeliveryError`);
+  transport-specific errors belong to E2 and E3 defines no error
+  hierarchy of its own.
+- **No retry**: a failed send is not retried, re-queued or
+  re-routed; there is no backoff and no second mapping/sending path.
+- **No dedupe**: the coordinator is stateless — no seen-transition or
+  delivered-event registry, no incident ids, no flap suppression, no
+  pending notification state, no retry counters, no delivery
+  receipts and no mutable global state. Calling
+  `notify_transition()` twice with the same incident-worthy
+  transition performs two independent sender calls by design; E3 is
+  deliberately not a dedupe layer.
+- **No persistence**: no SQLite writes, no incident or notification
+  persistence, no delivery history.
+- **No HealthEngine ownership**: the coordinator never calls
+  `HealthEngine.evaluate_host()`, never evaluates heartbeat freshness
+  or resources, never performs TCP probes, never resolves host state
+  and never creates `HostTransition`s or retains D3/D4 state. A later
+  runtime unit passes `evaluation.transition` from the accepted D4
+  `HealthEngine` into E3.
+- **No runtime orchestration yet**: the periodic health evaluation
+  loop, the all-host iteration, scheduling, sleeping, asyncio, the
+  systemd central Sentinel unit, configuration/Telegram settings
+  wiring, Telegram polling/webhooks and Hermes Agent integration are
+  later Stage E/F units.
