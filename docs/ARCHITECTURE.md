@@ -1122,3 +1122,105 @@ Out of scope for E1: incident persistence/deduplication, flap
 suppression, message formatting/rendering, Telegram transport,
 retries/backoff, message queueing and notification records (later
 Stage E and F concerns).
+
+## 23. Telegram sender (Stage E2)
+
+Stage E2 adds the bounded Telegram delivery primitive
+(`hermes_sentinel.telegram`). The frozen Stage E1 `Incident` is its
+sole input: one accepted incident is rendered as one deterministic
+plain-text notification and produces exactly ONE outbound Telegram
+Bot API `sendMessage` attempt. E2 owns only Telegram delivery
+settings, the frozen rendering, the single bounded request/response
+exchange and the secret-safe failure boundary — no runtime
+orchestration, no evaluation loop, no scheduler, no queue and no
+persistence.
+
+- **Sole input**: the accepted E1 `Incident` is the only
+  notification input. `render_incident_message(incident)` projects
+  it and E2 duplicates none of its semantics.
+- **Sender-only bot**: the Sentinel Telegram bot is dedicated to
+  delivery. This module never fetches inbound updates (`getUpdates`
+  is banned), never polls Telegram, never registers a webhook and
+  implements no bot commands, acknowledgements or message
+  editing/deleting.
+- **Fixed destination**: `https://api.telegram.org` is compiled in;
+  there is no configurable API base URL. `sendMessage` is the only
+  Telegram method invoked, reached as
+  `/bot<token>/sendMessage` where the validated bot token forms the
+  single authenticated URL path component.
+- **Settings**: immutable frozen slotted `TelegramSettings(bot_token,
+  chat_id, message_thread_id=None, timeout_seconds=10.0)`. The bot
+  token is a secret: non-empty, used verbatim (never stripped or
+  normalized), validated against a conservative token alphabet
+  (ASCII letters, digits, `:`, `_`, `-`) that rejects whitespace,
+  control characters, path separators, query/fragment markers and
+  percent escapes up front, excluded from the dataclass repr, and
+  never surfaced in application error text. `chat_id` is a non-zero
+  integer (negative ids address Telegram groups/supergroups; bool is
+  invalid). `message_thread_id` is `None` or a positive integer.
+  `timeout_seconds` must be finite and > 0. No environment parsing
+  or secret loading happens here; runtime configuration wiring
+  belongs to a later unit.
+- **Rendering**: plain text only — no Markdown/MarkdownV2/HTML parse
+  mode and no escaping framework. The exact frozen five-line shape
+  (kind line is `DOWN` or `RECOVERED`, states are the `HostState`
+  values, timestamp is `incident.at.isoformat()` verbatim):
+
+  ```
+  Hermes Sentinel
+  DOWN
+  Host: prod
+  State: degraded -> down
+  At: 2026-09-20T12:34:56+00:00
+  ```
+
+  No emojis, no summary fields, no wall-clock reads, no silent
+  truncation. The rendering function is pure (no clock, no network,
+  no I/O).
+- **Topic delivery**: when `message_thread_id` is configured the
+  request body additionally carries exactly that field (Telegram
+  topic delivery); it is omitted otherwise.
+- **One bounded attempt**: one `send(incident)` renders exactly one
+  message and performs exactly one application-level outbound
+  request: method POST, HTTPS only, fixed host `api.telegram.org`,
+  `Content-Type: application/json`, deterministic UTF-8 JSON body
+  containing exactly `chat_id` and `text` (plus `message_thread_id`
+  only when configured). No `parse_mode`, `disable_notification`,
+  `protect_content`, `reply_markup` or any other Telegram parameter
+  is ever added. The bot token belongs only to the authenticated
+  URL path and never appears in the JSON body.
+- **No redirect following**: automatic redirect following is
+  explicitly disabled in the production stdlib opener (the default
+  redirect handler is replaced by one that turns any 3xx response
+  into an error), so a redirect can never create a second outbound
+  attempt; a 3xx response is simply a delivery failure.
+- **Success contract**: delivery succeeds only when BOTH hold —
+  HTTP status == 200, AND a bounded response body read (fixed sane
+  upper bound) that parses as JSON and whose top-level `"ok"` is
+  exactly `true`. Telegram's returned message object is neither
+  required nor persisted. Malformed or oversized responses are
+  failures.
+- **No retries**: no retry loop, no backoff, no `Retry-After`
+  handling, no queue. One `send()` performs at most one HTTP
+  request attempt, before and after any failure.
+- **Error boundary**: expected delivery failures (DNS/connect/TLS
+  failure, timeout, any non-200 status, redirects, malformed or
+  oversized response, `"ok"` not exactly true) raise
+  `TelegramDeliveryError` with concise synthetic messages that never
+  contain the bot token, the authenticated request URL, any part of
+  the response body or raw urllib exception text; unsafe exception
+  chaining is suppressed. Every response-like object acquired from
+  the transport receives exactly one cleanup attempt through one
+  coherent mechanism — both the response returned by the opener and
+  the file-like `HTTPError` raised for HTTP/redirect failures (its
+  body is never read for diagnostics). Cleanup is equally bounded:
+  an expected cleanup failure on an otherwise-successful exchange
+  becomes a generic `TelegramDeliveryError`, a bounded delivery
+  failure already determined for the exchange always wins over a
+  concurrent cleanup failure, and raw cleanup exceptions never
+  escape the boundary. Unrelated programmer errors are not broadly
+  wrapped.
+- **No runtime orchestration yet**: periodic health evaluation, the
+  all-host loop, incident persistence, deduplication/flap
+  suppression, delivery scheduling/queueing and the asyncio daemon
+  are later Stage E/F units; E2 is only the sender primitive.

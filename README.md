@@ -80,17 +80,27 @@ evaluation succeeds — any failure leaves the remembered state
 exactly intact, and a restart resets every host. Stage D is
 CLOSED_GREEN.
 
-Stage E has started. E1 Incident Core is the current stage: the
-pure incident domain layer (`src/hermes_sentinel/incidents.py`)
-projecting the frozen Stage D `HostTransition` onto the incident
-vocabulary — a DOWN event (any transition into DOWN) maps to
-`IncidentKind.DOWN`, a RECOVERED event (any transition out of
-DOWN) maps to `IncidentKind.RECOVERED`, and ordinary
-`HEALTHY <-> DEGRADED` changes map to `None`. The immutable
+Stage E1 is CLOSED_GREEN: the pure incident domain layer
+(`src/hermes_sentinel/incidents.py`) projecting the frozen Stage D
+`HostTransition` onto the incident vocabulary — a DOWN event (any
+transition into DOWN) maps to `IncidentKind.DOWN`, a RECOVERED event
+(any transition out of DOWN) maps to `IncidentKind.RECOVERED`, and
+ordinary `HEALTHY <-> DEGRADED` changes map to `None`. The immutable
 `Incident` wraps the canonical `HostTransition` directly and
-duplicates none of its facts. Telegram delivery is NOT implemented
-yet, and no incident persistence or runtime evaluation loop exists
-yet — those are later Stage E/F roadmap units.
+duplicates none of its facts.
+
+Stage E2 is the current stage: the bounded Telegram sender primitive
+(`src/hermes_sentinel/telegram.py`) now exists in this candidate. It
+renders the accepted E1 `Incident` as one deterministic plain-text
+message and performs exactly one outbound Telegram Bot API
+`sendMessage` POST to the fixed `https://api.telegram.org` origin
+with a sender-only bot — secret-safe `TelegramDeliveryError`
+failures, redirects refused, no retries, HTTP 200 + `"ok": true`
+required for success, no `getUpdates`. Runtime
+evaluation/notification orchestration — the periodic health loop,
+incident persistence, deduplication and delivery scheduling — is
+still NOT implemented: those are later Stage E/F roadmap units.
+Stage E is not complete and the MVP is not complete.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
