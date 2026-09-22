@@ -1442,3 +1442,114 @@ configuration, logging/metrics, retry/backoff, queues, incident
 persistence, dedupe/flap suppression, new database schema, service
 monitoring, Hermes integration, remote remediation, deployment and
 Stage F production hardening.
+
+## 27. Central application settings loader (Stage E6)
+
+Stage E6 adds the bounded typed loader (`hermes_sentinel.settings`)
+that turns ONE caller-supplied environment mapping into exactly the
+already-accepted configuration objects the future composition root
+needs — and nothing else:
+
+    load_central_settings(env: Mapping[str, str]) -> CentralSettings
+
+- **Loading only, no composition**: E6 constructs no SQLite
+  connection/repository, no `HeartbeatIngestor`, no B3/B4/B5
+  adapters/server, no `HealthEngine`, no `TelegramSender`, no
+  `NotificationCoordinator`, no `MonitoringCycle`, no
+  `SentinelRuntime`, and starts nothing. `CentralSettings` is the
+  immutable frozen aggregate of `SentinelConfig`, `NodeCredentials`,
+  `TelegramSettings`, `database_path`, `listen_host`, `listen_port`,
+  `monitor_interval_seconds` and `poll_interval_seconds` — the exact
+  inputs the later composition-root unit will wire together.
+- **Explicit environment, one stable snapshot**: `os.environ` is
+  never read implicitly — the caller supplies the mapping (the future
+  composition root may pass `os.environ` explicitly). The mapping is
+  snapshotted into a plain dict exactly once, before parsing, so one
+  load uses one stable input view; a mapping that cannot be read
+  deterministically is itself a bounded settings failure. Unrelated
+  keys are ignored; there are no aliases or legacy variable names.
+- **Environment contract**: required — `SENTINEL_DATABASE_PATH`,
+  `SENTINEL_LISTEN_HOST`, `SENTINEL_LISTEN_PORT`,
+  `SENTINEL_MONITOR_INTERVAL_SECONDS`,
+  `SENTINEL_POLL_INTERVAL_SECONDS`, `SENTINEL_HOSTS_JSON`,
+  `SENTINEL_NODE_TOKENS_JSON`, `SENTINEL_TELEGRAM_BOT_TOKEN`,
+  `SENTINEL_TELEGRAM_CHAT_ID`; optional —
+  `SENTINEL_TELEGRAM_MESSAGE_THREAD_ID`,
+  `SENTINEL_TELEGRAM_TIMEOUT_SECONDS` (absent preserves the accepted
+  `TelegramSettings` 10.0-second default). String values are kept
+  verbatim (never stripped or normalized) but must be non-empty after
+  a whitespace check. The database path triggers no filesystem access
+  (no directories or files are created) and the listen host no
+  DNS/network action.
+- **Strict scalar parsing**: `SENTINEL_LISTEN_PORT` and the Telegram
+  integer values are strict decimal integer strings — no float forms,
+  no underscores, no surrounding whitespace, no silent coercion; the
+  listen port is additionally restricted to the production range
+  [1, 65535]. The monitor/poll intervals are strict decimal number
+  strings parsed to finite, strictly positive floats — the same
+  fail-fast interval semantics the accepted E5 `SentinelRuntime`
+  enforces; explicitly malformed values are never silently coerced
+  to a fallback. Decimal integer strings beyond the CPython
+  integer-string conversion limit fail through the same bounded
+  error — no raw `int()` `ValueError` leaks.
+- **Hosts JSON**: `SENTINEL_HOSTS_JSON` is a JSON array; each item is
+  one host object with required `name`, `heartbeat`, `external` and
+  optional `thresholds`, `services`. Nested objects accept exactly
+  the existing accepted-constructor fields (`HeartbeatSettings`:
+  `expected_interval_seconds`, `stale_after_seconds`; external:
+  `tcp_host`, `tcp_port` plus the optional `timeout_seconds` /
+  `down_confirmations` / `recovery_confirmations`; `Thresholds`: the
+  six threshold fields, with `null` allowed only for `load5_max`).
+  Missing optional fields keep the accepted dataclass defaults
+  (threshold defaults, empty services tuple, external
+  timeout/confirmation defaults; `services` lists become tuples). At
+  every supported object level the boundary parse is strict: no
+  unknown keys, no duplicate JSON object keys, no bool-as-number, no
+  numeric strings where a JSON number is required, no floats where a
+  JSON integer is required, and no non-finite JSON constants
+  (`NaN`/`Infinity`) or overflowed number literals (`1e999`). Exact
+  JSON integers are preserved verbatim — no premature float
+  conversion that could overflow or silently round them
+  (`9007199254740993` and `int(sys.float_info.max) + 1` stay exact) —
+  and the accepted constructors stay authoritative for their own
+  numeric validity: E6 establishes no independent numeric range. A
+  numeric-validation failure raised by an accepted constructor for
+  external configuration — including the raw `OverflowError` of an
+  integer the constructor itself cannot safely evaluate — is bounded
+  as `CentralSettingsError`, as is excessively nested JSON: no raw
+  overflow or recursion failure leaks. Malformed values are never
+  silently coerced; duplicate host names are rejected through the
+  accepted `SentinelConfig` constructor.
+- **Credentials**: `SENTINEL_NODE_TOKENS_JSON` is a JSON object of
+  node name -> secret token, every value a string. For production
+  settings loading the credential node set must match the configured
+  `SentinelConfig` host-name set exactly — every configured host has
+  exactly one credential, and no credential exists for an
+  unknown/unconfigured host. Construction then goes through the
+  accepted `NodeCredentials`, whose secret validation and
+  duplicate-token rejection stay authoritative.
+- **Bounded, secret-safe failure boundary**: every external
+  malformed/missing-settings failure raises the bounded
+  `CentralSettingsError`; raw json/int/float, overflow and recursion
+  exceptions never leak.
+  Messages identify at most the variable name, non-secret field paths
+  and the category of validation failure — never heartbeat tokens,
+  the Telegram bot token, the secret JSON documents or an environment
+  mapping repr. Unsafe exception chaining is suppressed: boundary
+  errors are raised outside the active parser handlers (flag-based
+  control flow, the wire.py snapshot precedent), so no raw
+  secret-bearing parser/context exception stays attached. Nothing is
+  logged. The `CentralSettings` repr stays secret-safe through the
+  accepted `NodeCredentials`/`TelegramSettings` repr contracts.
+- `.env.example` documents the exact E6 variable names with synthetic
+  placeholder values only, clearly separating non-secret host
+  configuration, reporter credential secrets and the Telegram
+  bot-token secret. It is documentation/example input only — no
+  dotenv runtime dependency exists.
+
+Out of scope for E6: everything application-shaped — the composition
+root, server/runtime construction and lifecycle, CLI/entrypoints,
+signal handling, the central Sentinel systemd service, TLS
+termination, reverse proxy, retries/backoff, logging frameworks,
+persistence or schema changes, Hermes integration, remote
+remediation, deployment and Stage F production hardening.
