@@ -1553,3 +1553,86 @@ signal handling, the central Sentinel systemd service, TLS
 termination, reverse proxy, retries/backoff, logging frameworks,
 persistence or schema changes, Hermes integration, remote
 remediation, deployment and Stage F production hardening.
+
+## 28. Central application composition root (Stage E7)
+
+Stage E7 adds the minimal central composition root
+(`hermes_sentinel.application`) that wires the already-accepted B1–E6
+components into ONE owned Sentinel application — construction and
+bounded resource ownership only:
+
+    build_application(settings: CentralSettings) -> SentinelApplication
+
+- **Exact composition graph**: one B1 SQLite connection opened through
+  `connect(settings.database_path)`; ONE `HeartbeatRepository` on
+  exactly that connection; `HeartbeatIngestor(config, repository)` ->
+  `AuthenticatedHeartbeatAdapter(config, credentials, ingestor)` ->
+  `HeartbeatHttpAdapter(wire)` ->
+  `create_heartbeat_http_server(adapter, host, port)` (bound);
+  `HealthEngine(config, repository)` on the SAME repository;
+  `TelegramSender(settings.telegram)` ->
+  `NotificationCoordinator(sender)` ->
+  `MonitoringCycle(config, engine, coordinator)`; finally
+  `SentinelRuntime(heartbeat_server, monitoring_cycle,
+  monitor_interval_seconds,
+  poll_interval_seconds=settings.poll_interval_seconds)`. Each
+  collaborator is constructed exactly once — no duplicate repository,
+  no second database connection, no second Telegram sender, no
+  parallel component graph. The returned `SentinelApplication` owns
+  exactly three things: the composed runtime, the bound B5 heartbeat
+  listener and the B1 SQLite connection.
+- **One shared persistence session (invariant)**: the heartbeat write
+  path (`HeartbeatIngestor`) and the monitoring read path
+  (`HealthEngine`) observe the SAME `HeartbeatRepository` instance
+  backed by the SAME SQLite connection — preserving the accepted
+  single-threaded architecture: heartbeat HTTP write -> repository;
+  monitoring health read -> the same repository.
+- **Exactly two side effects**: opening/initializing the configured
+  SQLite database through the accepted B1 `connect()`, and binding
+  the configured B5 listener through the accepted
+  `create_heartbeat_http_server()`. Nothing else: no automatic
+  runtime start — `run_forever` is never called by construction — no
+  `serve_forever()`, no request serviced, no monitoring cycle
+  executed, no Telegram send, no TCP reachability probe, no signal
+  handler, no deployment. `TelegramSender` construction may build its
+  accepted stdlib opener; that is not a Telegram request.
+- **Minimal owned lifecycle**: `run_forever(should_stop=None)` is a
+  thin delegation to the accepted E5 `SentinelRuntime.run_forever()`
+  with the stop predicate passed through exactly as supplied — no new
+  scheduling, retry, error translation or loop semantics; runtime
+  exceptions propagate unchanged. `close()` closes the owned listener
+  via `server_close()` — deliberately NOT `shutdown()`: E5 never runs
+  `serve_forever()` and owns no serve-loop thread — and then the
+  owned SQLite connection, attempting BOTH cleanups even if the first
+  fails and never converting a cleanup failure into silent success.
+  The context-manager protocol (`with build_application(...) as
+  app:`) calls that same `close()` on exit. The `SentinelApplication`
+  repr exposes only owned collaborator types — no secrets.
+- **Fail-safe construction rollback**: if construction fails after
+  the database is opened, the connection is closed before the failure
+  escapes; if it fails after the listener is bound, `server_close()`
+  is attempted and the connection is closed. The ORIGINAL
+  construction failure always remains the primary escaping failure —
+  a secondary rollback cleanup failure never replaces it (rollback
+  failures are swallowed for exactly this reason; only an explicit
+  `close()` after a successful build surfaces cleanup failures). No
+  retries; expected constructor/bind/database errors propagate from
+  their accepted owners unchanged, with no new application error
+  hierarchy.
+- **Settings contract**: `build_application` consumes a
+  `CentralSettings` value only. It never reads the process
+  environment, never calls `load_central_settings`, and never
+  re-opens E6 validation — a future process/entrypoint unit passes
+  the environment to E6 and the resulting settings here.
+- **No new concurrency**: the accepted E5 single-thread model is
+  preserved — no `ThreadingHTTPServer`, no threads, no asyncio, no
+  multiprocessing, no executors, no background workers.
+
+Out of scope for E7: implicit process-environment access, .env
+loading, CLI/entrypoints/`__main__`, console scripts, signal handling
+(SIGTERM/SIGINT), daemonization, PID files, the central Sentinel
+systemd service, deployment scripts, TLS termination, reverse proxy
+configuration, access/application logging frameworks, metrics,
+retry/backoff, queues, incident persistence, dedupe/flap suppression,
+schema changes/migrations, service monitoring, Hermes integration,
+remote remediation and Stage F production hardening.

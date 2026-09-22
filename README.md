@@ -146,13 +146,13 @@ lifecycle wiring (no signal handling yet); exceptions propagate
 unchanged with no retry. All collaborators are injected — the
 runtime constructs nothing and closes nothing.
 
-Stage E6 is the current stage: the bounded central application
-settings loader (`src/hermes_sentinel/settings.py`) now exists in
-this candidate. `load_central_settings(env)` — the caller supplies
+Stage E6 is CLOSED_GREEN: the bounded central application
+settings loader (`src/hermes_sentinel/settings.py`).
+`load_central_settings(env)` — the caller supplies
 the environment mapping explicitly, never an implicit `os.environ`
 read — snapshots it and strictly parses it into one immutable
 `CentralSettings` value holding exactly the already-accepted
-configuration objects the future composition root needs:
+configuration objects the composition root needs:
 `SentinelConfig` (from the `SENTINEL_HOSTS_JSON` host array — strict
 JSON with no unknown or duplicate keys, no bool-as-number and no
 non-finite constants), `NodeCredentials` (from
@@ -165,11 +165,31 @@ malformed or missing input fails through the bounded
 `CentralSettingsError` with secret-safe messages that never echo
 node tokens or the Telegram bot token. The loader constructs no
 server, repository, engine, sender, coordinator, cycle or runtime.
-The application composition root (wiring these settings into the
-constructed application), the central Sentinel systemd unit,
-production service packaging and hardening are still NOT implemented:
-those are later Stage E/F roadmap units. Stage E is not complete and
-the MVP is not complete.
+
+Stage E7 is the current stage: the minimal central application
+composition root (`src/hermes_sentinel/application.py`) now exists
+in this candidate. `build_application(settings)` consumes one
+already-loaded `CentralSettings` value (it never reads the process
+environment or re-validates settings) and constructs the accepted
+B1–E6 components exactly once each into ONE owned application: one
+B1 SQLite connection, ONE `HeartbeatRepository` shared by both the
+B2 ingestor and the D4 health engine, the B3/B4/B5 heartbeat
+listener chain bound to the configured host/port, and the
+E2/E3/E4/E5 monitoring-and-runtime chain — returned as a
+`SentinelApplication` owning the composed runtime, the bound
+listener and the connection. Its only two side effects are the
+database open and the listener bind: nothing is started, served,
+monitored or sent by construction. `run_forever(should_stop=...)`
+is thin delegation to the accepted E5 runtime; `close()` (or
+context-manager exit) closes the owned listener and connection
+without swallowing cleanup failures; a construction failure after a
+resource is opened rolls back every opened resource while the
+original failure still escapes. Sentinel is still NOT yet a
+complete production service/process: the process/entrypoint unit
+(passing the environment to E6 and the settings to E7, with signal
+lifecycle), the central Sentinel systemd unit, deployment and
+Stage F production hardening remain outstanding later units.
+Stage E is not complete and the MVP is not complete.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
