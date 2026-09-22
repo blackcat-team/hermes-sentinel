@@ -1707,3 +1707,88 @@ reverse proxy, firewall configuration, logging frameworks, metrics,
 retry/backoff, queueing, incident persistence, schema changes,
 service monitoring, Hermes integration, dead-man monitoring and
 Stage F production hardening.
+
+## 30. Central systemd packaging / deployment boundary (Stage E9)
+
+Stage E9 adds the minimal declarative Ubuntu/systemd packaging for the
+already-accepted E8 central process — packaging only, no production
+Python behavior change, and no deployment execution by the project:
+
+    E8 console process (hermes-sentinel entrypoint)
+                 |
+      systemd service (hermes-sentinel.service, Type=simple)
+                 |
+     EnvironmentFile /etc/hermes-sentinel/sentinel.env
+                 |
+     dedicated runtime identity (hermes-sentinel)
+                 |
+     state directory /var/lib/hermes-sentinel (StateDirectory)
+
+- **Declarative packaging only**: the artifacts are
+  `packaging/systemd/hermes-sentinel.service`, the safe synthetic
+  template `packaging/systemd/sentinel.env.example` and the operator
+  runbook `docs/SENTINEL_DEPLOYMENT.md`, verified by deterministic
+  static packaging tests. E9 deploys nothing itself: repository state
+  is not deployed state, and no live/deployment claim is made from
+  packaging or documentation.
+- **Frozen installation model**: the central service runs as the
+  dedicated system identity `hermes-sentinel` (never `root`, `hermes`,
+  `deploy`, `www-data` or `nobody`); the application and venv live
+  root-managed under `/opt/hermes-sentinel` with the one canonical
+  entrypoint `/opt/hermes-sentinel/venv/bin/hermes-sentinel`;
+  configuration lives in `/etc/hermes-sentinel` (root:root, 0750)
+  with `sentinel.env` (root:root, 0600); runtime state lives in
+  `/var/lib/hermes-sentinel` (hermes-sentinel:hermes-sentinel, 0750)
+  managed through `StateDirectory`/`StateDirectoryMode`; the unit
+  installs as `/etc/systemd/system/hermes-sentinel.service`
+  (root:root, 0644) with `WantedBy=multi-user.target`. These are
+  central-service paths and do not replace or reinterpret the
+  already-accepted reporter deployment paths.
+- **EnvironmentFile boundary**: every E6 setting — the nine required
+  variables plus the two optional Telegram variables — reaches the
+  process only through the systemd manager reading `sentinel.env`;
+  the service user never needs read permission on that file, and no
+  secret ever appears in the unit, in ExecStart arguments or on a
+  command line. ExecStart directly executes the E8 entrypoint — no
+  `/bin/sh`, no `bash -c`, no sudo, no env prefix, no wrapper loops.
+  The JSON variables keep whole-value single quoting (systemd removes
+  the outer quote pair, the literal JSON double quotes inside reach
+  E6 intact, no `export`, no alternate configuration format — E6
+  stays the only parser), and the checked-in example is deliberately
+  non-runnable: its mandatory placeholders fail E6 validation before
+  a usable service starts.
+- **Restart is process supervision only**: `Restart=on-failure` with
+  `RestartSec=5s` is systemd supervision of an abnormally exited
+  process. It is NOT application retry, Telegram retry, heartbeat
+  retry, monitoring-cycle retry or backoff logic inside Sentinel. A
+  normal operator stop sends SIGTERM (`KillSignal=SIGTERM`), the E8
+  process exits cooperatively through the E7 cleanup and is
+  deliberately not restarted — `Restart=always` and shell restart
+  loops are forbidden.
+- **Baseline isolation only**: `NoNewPrivileges=yes`, `PrivateTmp=yes`
+  and `UMask=0077` with journal-directed stdout/stderr — the full
+  sandbox/hardening policy is deliberately NOT attempted here and
+  remains Stage F.
+- **B5 remains a plaintext backend**: E9 implements no TLS
+  termination and no reverse proxy configuration; the safe example
+  binds `127.0.0.1`, and the plaintext listener must not be exposed
+  directly to the public Internet. E9 packaging alone is not a claim
+  that remote production reporters can yet safely reach this backend
+  from the Internet.
+- **No remote deployment/remediation**: deployment is a local
+  operator action on the central host documented in the runbook.
+  Sentinel never SSHes to hosts, pulls/deploys itself, invokes remote
+  systemctl, installs packages remotely, modifies monitored hosts or
+  performs remediation; there is no Ansible/Fabric, no deployment
+  daemon, no self-updater and no installer script in E9.
+- **Stage separation freeze**: E6 = settings semantics, E7 =
+  application resources, E8 = process lifecycle/signals, E9 = Linux
+  process packaging/supervision. E9 launches exactly the E8
+  entrypoint and adds no second process shape.
+
+Out of scope for E9: installer/deployment automation, TLS
+termination, reverse proxy and firewall configuration, logging
+frameworks, metrics, retry/backoff, queueing, incident persistence,
+schema changes, service self-monitoring, Hermes integration,
+dead-man monitoring, final runtime/MVP acceptance and Stage F
+production hardening.

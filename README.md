@@ -185,9 +185,9 @@ listener and connection without swallowing cleanup failures; a
 construction failure after a resource is opened rolls back every
 opened resource while the original failure still escapes.
 
-Stage E8 is the current stage: the minimal central process lifecycle
-/ entrypoint (`src/hermes_sentinel/process.py`) now exists in this
-candidate. `run_process(env)` connects the accepted layers — the
+Stage E8 is CLOSED_GREEN: the minimal central process lifecycle
+/ entrypoint (`src/hermes_sentinel/process.py`). `run_process(env)`
+connects the accepted layers — the
 exact environment mapping to E6 `load_central_settings`, the exact
 resulting settings to E7 `build_application`, the composed
 application to one `run_forever` call — and installs cooperative
@@ -204,10 +204,29 @@ central process is launchable through the one console entrypoint
 `hermes-sentinel` (`hermes_sentinel.process:main`), which is also
 the only place production code implicitly reads the process
 environment. This is a process boundary, not a production
-deployment claim: the central Sentinel systemd unit,
-EnvironmentFile packaging, deployment tooling and Stage F production
-hardening remain outstanding later units. Stage E is not complete
-and the MVP is not complete.
+deployment claim.
+
+Stage E9 is the current stage: the minimal declarative Ubuntu/systemd
+packaging and operator deployment runbook for that accepted central
+process. `packaging/systemd/hermes-sentinel.service` launches exactly
+the E8 entrypoint (`/opt/hermes-sentinel/venv/bin/hermes-sentinel`)
+as `Type=simple` under the dedicated `hermes-sentinel` system
+identity, with every E6 setting supplied through the
+`EnvironmentFile=/etc/hermes-sentinel/sentinel.env` boundary (the
+checked-in `packaging/systemd/sentinel.env.example` is a safe
+synthetic, deliberately non-runnable template), a
+`StateDirectory=hermes-sentinel` state directory, baseline
+non-invasive isolation and `Restart=on-failure` systemd process
+supervision only — a normal operator stop through SIGTERM is handled
+cooperatively by E8 and deliberately not restarted. The operator
+runbook is [docs/SENTINEL_DEPLOYMENT.md](docs/SENTINEL_DEPLOYMENT.md).
+Packaging is declarative: this repository state is packaging only,
+not a deployed or production-verified installation, and E9 makes no
+claim of production deployment or live acceptance (the B5 backend
+remains plaintext — TLS termination/reverse proxy stays Stage F).
+Stage E is not complete and the MVP is not complete: Stage E still
+requires the final runtime/MVP acceptance after E9, and Stage F
+hardening remains outstanding.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw

@@ -1,0 +1,51 @@
+# Hermes Sentinel — Stage E9 central systemd service unit.
+#
+# Declarative packaging for the CENTRAL Sentinel process on the central
+# Ubuntu host. The unit launches ONLY the already-accepted E8 console
+# entrypoint (hermes_sentinel.process:main, installed as
+# /opt/hermes-sentinel/venv/bin/hermes-sentinel) under a dedicated
+# unprivileged system identity — no shell wrapper, no second
+# implementation, no arguments.
+#
+# Install destination (operator action, see docs/SENTINEL_DEPLOYMENT.md):
+#   /etc/systemd/system/hermes-sentinel.service  (root:root, 0644)
+#
+# Configuration boundary: every E6 setting reaches the process through
+# the systemd manager from /etc/hermes-sentinel/sentinel.env
+# (root:root, 0600). The service process itself never needs read
+# permission on that file, and no secret value ever appears in this
+# unit, in ExecStart arguments or on any command line.
+#
+# Restart=on-failure is systemd PROCESS SUPERVISION only: it restarts
+# the process after an ABNORMAL exit. It is not application retry,
+# Telegram retry, heartbeat retry, monitoring-cycle retry or backoff
+# logic inside Sentinel. A normal operator stop (systemctl stop) sends
+# SIGTERM; the E8 process handles it cooperatively, exits normally and
+# is deliberately NOT restarted. Restart=always is forbidden for the
+# same reason.
+
+[Unit]
+Description=Hermes Sentinel central monitoring service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hermes-sentinel
+Group=hermes-sentinel
+EnvironmentFile=/etc/hermes-sentinel/sentinel.env
+WorkingDirectory=/var/lib/hermes-sentinel
+ExecStart=/opt/hermes-sentinel/venv/bin/hermes-sentinel
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+StateDirectory=hermes-sentinel
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
