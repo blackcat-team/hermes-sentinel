@@ -1636,3 +1636,74 @@ configuration, access/application logging frameworks, metrics,
 retry/backoff, queues, incident persistence, dedupe/flap suppression,
 schema changes/migrations, service monitoring, Hermes integration,
 remote remediation and Stage F production hardening.
+
+## 29. Process lifecycle / entrypoint (Stage E8)
+
+Stage E8 adds the minimal central process boundary
+(`hermes_sentinel.process`) that connects the already-accepted layers
+into ONE launchable process — the process boundary only, no new
+semantics:
+
+    main() -> run_process(os.environ) -> E6 load_central_settings
+    -> E7 build_application -> SIGTERM/SIGINT cooperative stop request
+    -> SentinelApplication.run_forever(stop_predicate) -> guaranteed
+    E7 cleanup + previous signal handlers restored
+
+- **Process boundary**: `run_process(env)` receives the environment
+  mapping explicitly and hands the exact mapping object to the
+  accepted E6 `load_central_settings` exactly once; the exact
+  returned `CentralSettings` goes to the accepted E7
+  `build_application` exactly once; the application runs
+  `run_forever` exactly once. Nothing is reparsed, normalized or
+  reconstructed at this layer. `main()` is the ONLY place in
+  production code that implicitly reads the process environment: it
+  passes the live `os.environ` object through to `run_process`
+  (which forwards it to E6 unmodified — no copy, no parse, no
+  environment files, no aliases or defaults).
+- **Cooperative stop request**: SIGTERM and SIGINT handlers are
+  installed that ONLY mark a process-owned stop flag — no I/O, no
+  logging, no cleanup, no application call, no process exit, nothing
+  raised. The stop predicate handed to the runtime is False before
+  any stop signal, True after the first SIGTERM or SIGINT, stable
+  True thereafter and safe under repeated delivery; the accepted E5
+  loop notices the request at its next bounded loop boundary and
+  returns cooperatively. No force-kill / second-signal policy.
+- **Temporary signal ownership**: the previous SIGTERM/SIGINT
+  handlers are captured and restored when `run_process` exits —
+  normal runtime return, runtime exception, or
+  application-construction failure. Installation and restoration run
+  in the calling thread (no signal thread, no self-pipe machinery,
+  no exit-time hooks). A partially completed installation restores
+  everything already changed before the ORIGINAL installation
+  failure propagates; during such rollback a secondary restore
+  failure never replaces the original failure.
+- **E7 remains the sole resource owner**: the application is used
+  exactly as `with build_application(settings) as application:
+  application.run_forever(stop_request)` — the E7 context-manager
+  exit performs the owned listener/connection cleanup on every path.
+  E8 performs no direct listener, server or database cleanup and
+  adds no cleanup abstraction around E7 resources.
+- **Console entrypoint**: the one canonical installed script is
+  `hermes-sentinel = "hermes_sentinel.process:main"` in
+  `pyproject.toml` — no second CLI framework, no command-line
+  options, no `__main__` duplicate.
+- **Unchanged error semantics**: settings failures
+  (`CentralSettingsError`), E7 construction/database/bind failures,
+  runtime failures and ordinary signal API failures propagate
+  unchanged from their accepted owners — no retry, no backoff, no
+  broad exit-code translation, no catch-and-print framework. The
+  process returns normally only on graceful cooperative shutdown; an
+  uncaught failure stays uncaught so a later launcher observes it
+  naturally.
+- **No new concurrency**: no threads, no asyncio, no
+  multiprocessing, no executors, no background workers — the signal
+  handlers and the accepted E5 cooperative loop stay
+  single-threaded.
+
+Out of scope for E8: the central Sentinel systemd service,
+EnvironmentFile packaging, deployment scripts/runbooks,
+daemonization, PID files, privilege dropping, TLS termination,
+reverse proxy, firewall configuration, logging frameworks, metrics,
+retry/backoff, queueing, incident persistence, schema changes,
+service monitoring, Hermes integration, dead-man monitoring and
+Stage F production hardening.

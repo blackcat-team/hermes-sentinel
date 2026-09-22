@@ -166,30 +166,48 @@ malformed or missing input fails through the bounded
 node tokens or the Telegram bot token. The loader constructs no
 server, repository, engine, sender, coordinator, cycle or runtime.
 
-Stage E7 is the current stage: the minimal central application
-composition root (`src/hermes_sentinel/application.py`) now exists
-in this candidate. `build_application(settings)` consumes one
-already-loaded `CentralSettings` value (it never reads the process
-environment or re-validates settings) and constructs the accepted
-B1–E6 components exactly once each into ONE owned application: one
-B1 SQLite connection, ONE `HeartbeatRepository` shared by both the
-B2 ingestor and the D4 health engine, the B3/B4/B5 heartbeat
-listener chain bound to the configured host/port, and the
-E2/E3/E4/E5 monitoring-and-runtime chain — returned as a
-`SentinelApplication` owning the composed runtime, the bound
-listener and the connection. Its only two side effects are the
-database open and the listener bind: nothing is started, served,
-monitored or sent by construction. `run_forever(should_stop=...)`
-is thin delegation to the accepted E5 runtime; `close()` (or
-context-manager exit) closes the owned listener and connection
-without swallowing cleanup failures; a construction failure after a
-resource is opened rolls back every opened resource while the
-original failure still escapes. Sentinel is still NOT yet a
-complete production service/process: the process/entrypoint unit
-(passing the environment to E6 and the settings to E7, with signal
-lifecycle), the central Sentinel systemd unit, deployment and
-Stage F production hardening remain outstanding later units.
-Stage E is not complete and the MVP is not complete.
+Stage E7 is CLOSED_GREEN: the minimal central application
+composition root (`src/hermes_sentinel/application.py`).
+`build_application(settings)` consumes one already-loaded
+`CentralSettings` value (it never reads the process environment or
+re-validates settings) and constructs the accepted B1–E6 components
+exactly once each into ONE owned application: one B1 SQLite
+connection, ONE `HeartbeatRepository` shared by both the B2
+ingestor and the D4 health engine, the B3/B4/B5 heartbeat listener
+chain bound to the configured host/port, and the E2/E3/E4/E5
+monitoring-and-runtime chain — returned as a `SentinelApplication`
+owning the composed runtime, the bound listener and the connection.
+Its only two side effects are the database open and the listener
+bind: nothing is started, served, monitored or sent by construction.
+`run_forever(should_stop=...)` is thin delegation to the accepted E5
+runtime; `close()` (or context-manager exit) closes the owned
+listener and connection without swallowing cleanup failures; a
+construction failure after a resource is opened rolls back every
+opened resource while the original failure still escapes.
+
+Stage E8 is the current stage: the minimal central process lifecycle
+/ entrypoint (`src/hermes_sentinel/process.py`) now exists in this
+candidate. `run_process(env)` connects the accepted layers — the
+exact environment mapping to E6 `load_central_settings`, the exact
+resulting settings to E7 `build_application`, the composed
+application to one `run_forever` call — and installs cooperative
+SIGTERM/SIGINT handlers that do nothing but mark a process-owned
+stop request (the accepted E5 loop notices it at its next bounded
+loop boundary and returns cooperatively; no force-kill
+second-signal policy). Previous signal handlers are captured and
+restored on every exit path, with partial-installation rollback;
+application cleanup is guaranteed by the E7 context-manager
+lifecycle and E8 owns no resource cleanup of its own. Startup and
+runtime failures propagate unchanged — no retries, no exit-code
+translation, nothing swallowed. After installing the package the
+central process is launchable through the one console entrypoint
+`hermes-sentinel` (`hermes_sentinel.process:main`), which is also
+the only place production code implicitly reads the process
+environment. This is a process boundary, not a production
+deployment claim: the central Sentinel systemd unit,
+EnvironmentFile packaging, deployment tooling and Stage F production
+hardening remain outstanding later units. Stage E is not complete
+and the MVP is not complete.
 
 Stage B5 is a plaintext backend listener
 (`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
