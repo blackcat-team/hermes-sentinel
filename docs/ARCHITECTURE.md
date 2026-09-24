@@ -1792,3 +1792,177 @@ frameworks, metrics, retry/backoff, queueing, incident persistence,
 schema changes, service self-monitoring, Hermes integration,
 dead-man monitoring, final runtime/MVP acceptance and Stage F
 production hardening.
+
+## 31. External dead-man core (Stage H1A)
+
+Stage H1A adds the deterministic, transport-independent core for
+Stage H external dead-man monitoring (`hermes_sentinel.deadman`).
+H1A does NOT by itself close the section 6 shared-failure-domain
+gap: it provides the deterministic core (probe classification,
+debounce, durable notification intents with strict persisted-state
+integrity) that the future external dead-man requires. The gap is
+closed only once the later Stage-H units exist — the external probe
+transport, the packaging/deployment of the independent dead-man
+host, and live acceptance; those H1B/H2 units are NOT implemented
+at this stage and no claim is made about them here. H1A is CORE
+ONLY: no HTTP request, no Telegram transport, no environment
+loading, no CLI/process entrypoint, no systemd packaging, no
+filesystem I/O and no scheduling exist here.
+
+Frozen H0 design context (implemented by later Stage H units): the
+future dead-man runtime lives on an independent host outside the
+Sentinel failure domain (synthetic illustration: node `vpn-a` at
+192.0.2.10 probing `https://sentinel.example/v1/heartbeat` — RFC
+5737 / reserved documentation values only; concrete targets are
+operator deployment configuration and never tracked repository
+facts); the probe is an unauthenticated GET against the public
+heartbeat endpoint carrying no reporter token and never creating a
+heartbeat; the cadence is 60 seconds; alerting goes through an
+independent direct Telegram sender with a separate Stage-H
+credential; the security boundary stays observability-only (no SSH,
+no remote shell, no systemctl against Hermes, no remediation, no
+public listener).
+
+- **Own state vocabulary**: the Sentinel failure domain has its own
+  liveness model — `DeadManState.UNKNOWN` / `UP` / `DOWN` — which
+  is deliberately NOT the Stage D host `HEALTHY` / `DEGRADED` /
+  `DOWN` model and never reuses it as a semantic shortcut. The
+  module imports nothing from the rest of `hermes_sentinel`.
+- **Probe classification** (`classify_deadman_probe`) is a pure
+  boundary over an already-observed HTTP result
+  (`DeadManProbeResponse`: status, every `Allow` header value
+  verbatim with multiplicity preserved, raw body bytes). Healthy
+  ONLY when the canonical dead-man signature matches exactly:
+  status `405`, an `Allow` method list containing `POST`
+  (case-sensitive, RFC-style comma-list parsing, whitespace-only
+  tokens ignored), and an empty body. Any 2xx/3xx, 404, 502, other
+  4xx/5xx, missing/wrong `Allow`, lowercase `post`, or non-empty
+  (including whitespace-only) body is a probe failure — an
+  answering HTTP server is never healthy evidence by itself.
+  Network/DNS/TLS exceptions belong to the H1B transport and are
+  mapped to failed outcomes before this boundary. The observation
+  `repr` never reflects header values or body content (the B4
+  `HttpRequest` repr precedent).
+- **Debounce (frozen H0)**: exactly `DOWN_CONFIRMATIONS = 3`
+  consecutive failed probes confirm DOWN; exactly
+  `RECOVERY_CONFIRMATIONS = 2` consecutive successful probes end
+  DOWN. A single success resets the failure streak; a single
+  failure resets the success streak.
+- **State machine** (`advance_deadman_status`, keyword-only, pure):
+  `UNKNOWN` establishes `UP` silently on the first success (no
+  startup notification) and accumulates failures exactly like `UP`
+  (failures #1/#2 stay in the current state, #3 transitions into
+  DOWN); a confirmed DOWN holds until the recovery streak confirms
+  (`DOWN -> UP` on the second consecutive success). `DeadManStatus`
+  is a CANONICAL OPERATIONAL SNAPSHOT — the current classification
+  AND exactly the future-relevant memory a oneshot process needs:
+  both debounce streaks, the current state's time anchor
+  (`state_changed_at`), the ordered pending notification intents,
+  the next notification id and — while DOWN — the current outage's
+  explicit binding (`DeadManCurrentDown`: its exact DOWN intent id
+  plus whether THAT intent was acknowledged). Historical
+  provenance of how the current state was reached is deliberately
+  NOT persisted: two histories with identical future behavior
+  serialize to the identical canonical state. Invariants are
+  fail-closed and bounded to the snapshot's own facts (counters
+  are true non-bool integers with debounce-canonicalized shapes;
+  `state_changed_at` is `None` exactly in the canonical initial
+  UNKNOWN and truly timezone-aware otherwise; UNKNOWN is only the
+  canonical initial form — no anchor, no pending intent, no
+  binding, untouched allocator (`next_notification_id == 1`);
+  UP carries no binding and may hold durable pending intents from
+  older unacknowledged outages; notification-ledger continuity
+  holds machine-wide — ids are allocated 1, 2, 3, ... without gaps
+  and acknowledgement is strictly oldest-first, so a non-empty
+  pending queue is always a strictly increasing CONTIGUOUS suffix
+  of the allocated ids anchored at `next_notification_id - 1`,
+  no pending intent is dated after the anchor, and the pending
+  KINDS follow the grammar `RECOVERED? DOWN*` — a RECOVERED intent
+  is allocated only for an outage whose DOWN intent was already
+  acknowledged, which oldest-first acknowledgement makes possible
+  only from a fully drained queue, so at most ONE RECOVERED can
+  ever be pending, it is always the oldest item, and it can never
+  carry id 1 (the first allocation of any real timeline is
+  necessarily a DOWN intent); and in DOWN the binding is required
+  with `notification_id == next_notification_id - 1` — while
+  unacknowledged that exact DOWN intent is still the pending TAIL
+  dated exactly at `state_changed_at`, and once acknowledged the
+  queue is fully drained).
+- **Notification intents / acknowledgement (durable, ordered)**:
+  H1A models intent, never delivery. The status carries an ORDERED
+  immutable tuple of pending `DeadManNotification` intents — never
+  a replaceable single slot: every intent the machine legitimately
+  creates remains durable until explicitly acknowledged, later
+  transitions only append (an older unacknowledged intent is never
+  replaced, overwritten, discarded, reordered or made impossible to
+  acknowledge), and repeated ticks for the same transition never
+  duplicate an intent. Each intent wraps its transition (the E1
+  incident precedent: the transition stays the canonical source of
+  `at`/`from_state`/`to_state` for future delivery) and carries a
+  deterministic monotonically increasing integer `notification_id`
+  allocated exactly once at creation and persisted via
+  `next_notification_id` — unique within the persisted dead-man
+  state history and independent of timestamps (no random UUIDs, no
+  wall-clock-derived ids; two distinct transitions with identical
+  datetimes still get distinct ids). Entering DOWN appends exactly
+  one DOWN intent and binds the outage to that exact id
+  (`DeadManCurrentDown`), preserved verbatim across encode/decode
+  restarts. Acknowledging that exact id marks the binding
+  acknowledged (the fact survives the queue removal); a RECOVERED
+  intent is appended on `DOWN -> UP` only when the bound outage is
+  marked acknowledged — never inferred from timestamps or from
+  queue presence/absence alone — and the binding is cleared as
+  part of the transition to UP; an unacknowledged DOWN intent
+  survives its own recovery (stays pending, never silently
+  discarded) and emits NO misleading RECOVERED for an outage the
+  operator was never notified about, and a later independent
+  outage appends its own distinct DOWN intent after it without
+  destroying it. `acknowledge_deadman_notification` acknowledges
+  BY ID and strictly oldest-first: it succeeds only for the exact
+  id of the oldest pending intent and never removes a different
+  intent; stale (already acknowledged), unknown and non-head ids
+  fail closed leaving the queue unchanged. This enables the H1B
+  sequence: transition detected -> persist state -> attempt
+  oldest-first delivery -> acknowledge only on successful delivery.
+- **Time semantics**: no wall-clock reads; every evaluation carries
+  its own truly timezone-aware `now` (`tzinfo` AND `utcoffset()`
+  not None), a `now` before the current state's `state_changed_at`
+  anchor fails closed, and offsets compare by instant.
+- **Persistence boundary (canonical operational snapshot)**:
+  pure strict helpers — `encode_deadman_status` produces
+  deterministic compact JSON with sorted keys, `schema_version`
+  awareness (version 4: the canonical snapshot with the
+  `state_changed_at` anchor and the `current_down` binding object,
+  no historical transition provenance; earlier unreleased
+  candidate shapes are unsupported) and canonical UTC ISO 8601
+  timestamps (the B1 precedent); `decode_deadman_status` fails
+  closed on every deviation (invalid JSON, duplicate keys,
+  non-finite constants, non-object roots, missing/unknown/extra
+  fields at every level, unsupported schema versions, unknown enum
+  values, bool/float counters, ids or binding fields, malformed or
+  naive timestamps, non-canonical transitions, a non-array pending
+  sequence, non-increasing/duplicate/non-contiguous/unanchored
+  pending ids, pending intents dated after the anchor, a RECOVERED
+  intent that is not the single oldest pending item or carries
+  id 1, an invalid notification kind/transition pairing, and
+  internally unsafe bindings — DOWN without `current_down`,
+  UP/UNKNOWN with one, a binding id other than
+  `next_notification_id - 1`, an unacknowledged binding missing
+  from the pending tail or dated away from `state_changed_at`, or
+  an acknowledged binding with something still pending) with the
+  bounded `DeadManStateDecodeError` — malformed state NEVER
+  silently becomes UP. STRICT DECODE proves exactly the schema,
+  types, enums, timestamps, counters, ids, queue ordering/grammar,
+  notification pairing, the current-DOWN binding and internal
+  future-behavior safety — it deliberately never attempts to prove
+  the complete historical path that led to the snapshot, and never
+  distinguishes histories that intentionally canonicalize to the
+  same future-equivalent state. The state carries no secret fields
+  by design. Reading/writing the state file (atomically) belongs
+  to the H1B runtime.
+
+Out of scope for H1A (and NOT implemented at this stage): the
+HTTPS probe transport and exception mapping, state-file I/O and
+atomic writes, the Telegram sender, credential and environment
+loading, cadence/scheduling, the oneshot process, systemd
+packaging, deployment, live acceptance, and any H1B/H2 work.
