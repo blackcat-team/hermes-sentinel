@@ -1966,3 +1966,120 @@ HTTPS probe transport and exception mapping, state-file I/O and
 atomic writes, the Telegram sender, credential and environment
 loading, cadence/scheduling, the oneshot process, systemd
 packaging, deployment, live acceptance, and any H1B/H2 work.
+
+## 32. External dead-man runtime adapters (Stage H1B-1)
+
+Stage H1B-1 adds the three bounded I/O adapters the future external
+dead-man oneshot runtime needs around the accepted H1A core
+(`hermes_sentinel.deadman_probe`, `hermes_sentinel.deadman_store`,
+`hermes_sentinel.deadman_telegram`). Adapters do I/O ONLY: each one
+performs its single bounded transport/filesystem action and hands
+the result to the frozen H1A contracts — the H1A state machine,
+classification and persistence semantics are never re-decided,
+duplicated or widened here. H1A remains the sole authority for
+state transitions and notification intent. No orchestration exists
+at this stage: H1B-1 owns no debounce, no notification semantics,
+no acknowledgement, no run scheduling, no sleeps, no wall-clock
+reads for H1A transitions and no composition of the full runtime
+cycle (H1B-2 scope).
+
+- **HTTPS liveness probe** (`DeadManProber` +
+  immutable `DeadManProbeSettings`): one bounded unauthenticated
+  `GET` against the configured public HTTPS heartbeat endpoint.
+  The URL must use HTTPS, carry a non-empty parsed host, no
+  userinfo (credentials) and no fragment, contain no
+  whitespace/control characters and a well-formed authority (a
+  malformed port/authority is a bounded validation failure, never a
+  raw parser error), and is
+  used VERBATIM — concrete targets stay operator deployment
+  configuration, never tracked repository facts. No reporter token,
+  no authentication headers and no request body travel with the
+  probe (it never creates a heartbeat); the single attempt is
+  bounded by a configurable timeout. Redirects are never followed
+  (the stdlib redirect handler is replaced by one that turns any
+  3xx into an error) and are never healthy evidence. A real HTTP
+  response — the returned response, or the file-like `HTTPError`
+  the stdlib raises for any non-2xx/redirect status — is converted
+  into the exact H1A `DeadManProbeResponse` boundary with every
+  `Allow` header value preserved verbatim (arrival order,
+  multiplicity) and classified exclusively by the accepted H1A
+  `classify_deadman_probe`; only enough response data is read to
+  distinguish an empty from a non-empty body (a single bounded
+  read), and body contents are never surfaced. DNS, connect, TLS,
+  timeout and every other expected HTTP transport failure — plus a
+  structurally impossible observation — map to the FAILED outcome,
+  never an unbounded/raw transport crash. Every acquired
+  response-like object receives exactly one cleanup attempt, and a
+  cleanup failure never changes an already-observed outcome (the
+  liveness evidence was fully read first) and never escapes as a
+  raw exception.
+- **Atomic dead-man state store** (`DeadManStateStore` +
+  bounded `DeadManStateStoreError`): the filesystem adapter around
+  the frozen H1A `encode_deadman_status` / `decode_deadman_status`
+  (schema v4; no migration framework). READ: an absent state file
+  is the canonical fresh start (`INITIAL_DEADMAN_STATUS`, UNKNOWN);
+  a present file is read through a read bounded to one byte beyond
+  the fixed byte bound — the read itself is the authoritative size
+  enforcement, so an oversized file is rejected before parsing and
+  never fully read — and decoded STRICTLY, and a corrupt, malformed,
+  unsupported-schema, non-UTF-8, unreadable or oversized file
+  surfaces as a bounded store error and is NEVER silently reset to
+  UNKNOWN — a damaged liveness ledger must stop the runtime, not
+  erase it. WRITE: the deterministic H1A encoding is written with
+  atomic replacement in the SAME directory (uniquely named
+  temporary file -> write -> flush -> fsync -> `os.replace`), so
+  no partial target file is ever exposed and a failed write leaves
+  the previous target untouched; the temporary file is removed on
+  every failure path; parent-directory durability is attempted
+  best-effort only where the platform supports it (POSIX
+  `O_DIRECTORY` fsync; silently skipped elsewhere); a document
+  beyond the same bounded size limit is rejected before the target
+  is touched (a state that could never be read back is never
+  written). The store never creates parent directories and holds
+  no secrets.
+- **Independent dead-man Telegram delivery**
+  (`DeadManTelegramSender` + immutable `DeadManTelegramSettings` +
+  `render_deadman_message`): sender-only delivery for one pending
+  H1A `DeadManNotification` — the future H1B runtime passes the
+  OLDEST pending intent. This is a SEPARATE Stage-H credential and
+  module from the central Sentinel's Stage E2 Telegram transport:
+  it imports nothing from `hermes_sentinel.telegram` and never
+  touches the central notification path, and central Telegram
+  behavior is unchanged. The bot token is validated against the
+  same conservative alphabet, excluded from the repr and never
+  surfaced in error text; `chat_id` plus optional
+  `message_thread_id` address the destination; the fixed
+  `https://api.telegram.org` origin receives exactly ONE
+  `sendMessage` POST per `send()` with a deterministic UTF-8 JSON
+  body of exactly `chat_id` and `text` (plus `message_thread_id`
+  only when configured), bounded by a configurable timeout. The
+  dead-man bot never fetches inbound updates, never registers an
+  inbound endpoint and never runs a receiving loop; there is no
+  retry, no backoff and no queue. Redirects are a failure
+  (redirect following explicitly disabled); success requires
+  HTTP 200 AND a bounded response body that parses as JSON with
+  top-level `"ok"` exactly `true`; expected failures raise the
+  bounded `DeadManTelegramDeliveryError` whose messages never
+  contain the bot token, the authenticated request URL, any part
+  of the response body or raw urllib exception text (unsafe
+  chaining suppressed; every acquired response-like object —
+  including the file-like `HTTPError` — receives exactly one
+  cleanup attempt, a bounded failure already determined always
+  winning over a concurrent cleanup failure). The rendering is
+  intentionally minimal for H1B — exactly three plain lines
+  (fixed `Hermes Sentinel Dead-Man` title, `DOWN`/`RECOVERED`
+  kind line, `At:` + the notification's confirmation moment) —
+  using ONLY facts present in the notification and inventing no
+  reachability details; Stage I0 owns the later Telegram UX
+  redesign. The sender NEVER acknowledges H1A state:
+  acknowledgement of the delivered id belongs to the later
+  orchestration, performed only after a successful delivery.
+
+Out of scope for H1B-1 (and NOT implemented at this stage): the
+H1B-2 orchestration/runtime cycle (load -> probe -> advance ->
+persist -> deliver -> acknowledge), environment loading and
+credential provisioning, the CLI/process entrypoint, systemd
+service/timer packaging for the dead-man host, deployment, H2 live
+acceptance, the Stage I0 Telegram UX redesign, retries/backoff of
+any kind, and any change to the accepted H1A semantics or the
+central Sentinel behavior.
