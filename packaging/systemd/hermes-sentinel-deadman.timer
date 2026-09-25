@@ -1,0 +1,37 @@
+# Hermes Sentinel — Stage H1B-2 external dead-man timer unit.
+#
+# Schedules the one-shot dead-man service on the frozen H0 60-second
+# cadence: a short initial delay after boot, then a fixed 60-second
+# activation interval with one-second accuracy and NO randomized
+# delay. This is SAMPLING cadence, not a retry policy: a failed
+# oneshot cycle does not stop the timer, and the next scheduled
+# activation is simply the next normal liveness observation (which
+# also naturally re-attempts a still-pending notification, at most
+# one per cycle). Missed observations after downtime are deliberately
+# NOT replayed (no Persistent=true) — the dead-man watches the
+# CURRENT Sentinel liveness, not a historical backlog.
+#
+# The timer is the singleton scheduling boundary: exactly one fixed
+# service unit is activated (no templated instances, no systemd-run,
+# no parallel launches), so two dead-man processes can never overlap,
+# and the fixed 60-second interval with AccuracySec=1s prevents any
+# accidental high-frequency loop. No OnCalendar schedules exist.
+#
+# Install destination (operator action):
+#   /etc/systemd/system/hermes-sentinel-deadman.timer  (root:root, 0644)
+#
+# Enable target (operator action): the TIMER only —
+#   systemctl enable --now hermes-sentinel-deadman.timer
+
+[Unit]
+Description=Schedule the Hermes Sentinel external dead-man one-shot monitor (60 s cadence)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=hermes-sentinel-deadman.service
+
+[Install]
+WantedBy=timers.target

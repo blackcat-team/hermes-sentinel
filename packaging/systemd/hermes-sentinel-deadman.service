@@ -1,0 +1,66 @@
+# Hermes Sentinel — Stage H1B-2 external dead-man systemd oneshot
+# service unit.
+#
+# Declarative packaging for the EXTERNAL dead-man host (the
+# independent host outside the Sentinel failure domain). The unit
+# launches ONLY the already-accepted H1B-2 oneshot entrypoint
+# (hermes_sentinel.deadman_process:main, installed as
+# /opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman) under a
+# dedicated unprivileged system identity — no shell wrapper, no
+# second implementation, no arguments. It is normally activated by
+# hermes-sentinel-deadman.timer (or manually, once, by the operator)
+# — the service itself has no [Install] section and is never enabled
+# directly, and Restart=no keeps systemd from turning one cycle into
+# a retry loop: the TIMER owns cadence, a failed cycle is simply
+# superseded by the next scheduled one.
+#
+# Install destination (operator action):
+#   /etc/systemd/system/hermes-sentinel-deadman.service  (root:root, 0644)
+#
+# Configuration boundary: all dead-man runtime configuration
+# (HERMES_SENTINEL_DEADMAN_* variables) is supplied by the systemd
+# manager from /etc/hermes-sentinel/deadman.env (root:root, 0600).
+# The dead-man process itself never needs read permission on that
+# file, and no token, URL or chat id value ever appears in this unit,
+# in ExecStart arguments or on a command line.
+#
+# Security boundary: the dead-man needs OUTBOUND DNS + HTTPS and
+# read/write access to exactly its own state file under
+# /var/lib/hermes-sentinel (StateDirectory). It needs no inbound
+# listener, no SSH, no shell-based remote control, no systemctl
+# against monitored hosts, no Docker socket, no broad filesystem
+# write and no root-only behavior — ProtectSystem=strict with the
+# state directory as the sole writable location, empty capability
+# sets and the standard hardening directives below encode exactly
+# that boundary.
+
+[Unit]
+Description=Hermes Sentinel external dead-man one-shot monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes-sentinel-deadman
+Group=hermes-sentinel-deadman
+EnvironmentFile=/etc/hermes-sentinel/deadman.env
+ExecStart=/opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman
+TimeoutStartSec=30s
+Restart=no
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+StateDirectory=hermes-sentinel
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=

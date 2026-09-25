@@ -699,8 +699,21 @@ class ProcessPurityTestCase(unittest.TestCase):
         )
         with pyproject.open("rb") as handle:
             data = tomllib.load(handle)
+        # The central console entrypoint is EXACTLY the E8 main —
+        # never shadowed or redirected. The table stays frozen: the
+        # only permitted additional script is the separate Stage
+        # H1B-2 external dead-man oneshot entrypoint.
         self.assertEqual(
-            {"hermes-sentinel": "hermes_sentinel.process:main"},
+            "hermes_sentinel.process:main",
+            data["project"]["scripts"]["hermes-sentinel"],
+        )
+        self.assertEqual(
+            {
+                "hermes-sentinel": "hermes_sentinel.process:main",
+                "hermes-sentinel-deadman": (
+                    "hermes_sentinel.deadman_process:main"
+                ),
+            },
             data["project"]["scripts"],
         )
 

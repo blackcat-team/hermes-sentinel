@@ -2083,3 +2083,119 @@ service/timer packaging for the dead-man host, deployment, H2 live
 acceptance, the Stage I0 Telegram UX redesign, retries/backoff of
 any kind, and any change to the accepted H1A semantics or the
 central Sentinel behavior.
+
+## 33. External dead-man oneshot runtime (Stage H1B-2)
+
+Stage H1B-2 composes the accepted H1A core and the accepted H1B-1
+adapters into ONE deterministic, systemd-friendly ONESHOT dead-man
+runtime (`hermes_sentinel.deadman_config`, `deadman_runtime`,
+`deadman_process` plus the generic packaging under
+`packaging/systemd/`). H1A and H1B-1 stay FROZEN: their semantics are
+never re-decided, duplicated or widened here, and the central
+Sentinel process is untouched. Stage H is NOT closed by H1B-2: the
+deployable code/packaging side exists, but deployment and the H2
+live outage acceptance remain NOT completed and no live/deployment
+claim is made.
+
+- **Oneshot + timer ownership**: the process performs exactly ONE
+  bounded cycle and exits; run CADENCE belongs exclusively to the
+  systemd timer (`hermes-sentinel-deadman.timer`, the frozen H0
+  60-second cadence). There is deliberately no internal daemon, no
+  sleep loop, no retry, no backoff, no inbound listener and no
+  signal-management framework inside the runtime — a short oneshot
+  needs none.
+- **Exact runtime ordering** (`run_deadman_cycle`, fixed and
+  safety-critical): load persisted state -> perform exactly one
+  probe -> obtain one explicit timezone-aware `now` (the injectable
+  `utc_now` boundary, called exactly once per cycle — one coherent
+  timestamp per state-machine evaluation, no clock logic inside
+  H1A, no naive datetimes) -> advance the accepted H1A state machine
+  -> persist the resulting state -> inspect the OLDEST pending
+  notification only (none: finish successfully) -> attempt exactly
+  one Telegram delivery -> on success acknowledge that exact
+  notification id and persist the acknowledged state.
+- **Persist-before-deliver / ACK-after-success**: the state produced
+  by the evaluation — including any newly created notification
+  intent — is persisted BEFORE any Telegram delivery is attempted,
+  and the acknowledgement is persisted only AFTER a successful
+  delivery. Therefore a process crash after Telegram accepted the
+  message but before the acknowledged state is persisted leaves the
+  same pending intent durable on disk and the next run delivers it
+  AGAIN: this is intentional AT-LEAST-ONCE external delivery — a
+  possible duplicate alert after a crash is always preferred over a
+  silently lost one, and exactly-once Telegram delivery is
+  deliberately NOT attempted (documented and tested explicitly).
+- **At most one delivery attempt per cycle**: always the OLDEST
+  pending intent, never a drain loop — bounded oneshot execution,
+  strict oldest-first H1A semantics, the timer naturally retries the
+  next cycle, and unbounded catch-up work is impossible. A Telegram
+  failure leaves the persisted pending queue unchanged: no
+  acknowledgement, no second post-delivery persist, the intent
+  survives for the next invocation.
+- **A probe failure is an observation, not a crash**: DNS/connect/
+  TLS/HTTP liveness failures already map to the FAILED outcome
+  inside the accepted H1B-1 prober and simply flow into the H1A
+  debounce. "The target is unreachable" is normal dead-man input; a
+  target DOWN observation with successful state processing is a
+  NORMAL completed cycle (exit 0), never an execution failure. Only
+  runtime-infrastructure failures are failures: invalid
+  configuration, state-store read/decode/write errors, Telegram
+  delivery failure and unexpected adapter/runtime setup failures
+  produce concise secret-safe diagnostics and a non-zero process
+  exit; a store load or first-persist failure happens strictly
+  BEFORE any Telegram attempt.
+- **Strict environment configuration**
+  (`load_deadman_settings` -> immutable `DeadManRuntimeSettings`
+  constructing exactly the accepted `DeadManProbeSettings`,
+  `DeadManStateStore` and `DeadManTelegramSettings`): the
+  project-prefixed `HERMES_SENTINEL_DEADMAN_*` scheme — required
+  `PROBE_URL`, `STATE_PATH`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`; optional `TELEGRAM_THREAD_ID` (absent =
+  cleanly unset), `PROBE_TIMEOUT_SECONDS`,
+  `TELEGRAM_TIMEOUT_SECONDS` (absent keeps the accepted defaults).
+  Missing required values fail closed, empty required values are
+  rejected, integers/floats are parsed strictly (no float forms, no
+  underscores, no whitespace, no bool-style ambiguity), the bot
+  token never appears in repr or error text, raw environment
+  mappings are never echoed, and unrelated environment variables are
+  irrelevant. The state path is configuration kept verbatim with NO
+  implicit parent-directory creation — directory/ownership
+  provisioning belongs to the deployment (H2). No production
+  secrets or default ids exist in the repository.
+- **Dedicated process/CLI entrypoint** (`hermes-sentinel-deadman`,
+  `hermes_sentinel.deadman_process:main`): separate from the central
+  Sentinel process; loads the env config once, builds the adapters,
+  runs exactly ONE cycle and exits. Output is minimal and
+  operator-useful (cycle completed, dead-man state, pending count on
+  stdout; one bounded error category line on stderr) and never
+  contains the token, an authenticated Telegram URL, a response
+  body, the raw environment mapping or persisted document contents.
+- **Generic systemd packaging**
+  (`hermes-sentinel-deadman.service` Type=oneshot +
+  `hermes-sentinel-deadman.timer` + `deadman.env.example`): the
+  service runs the dedicated entrypoint directly (no shell wrapper,
+  Restart=no, no daemon behavior, no privileged remote-control
+  capability) with `EnvironmentFile=/etc/hermes-sentinel/deadman.env`
+  and hardening compatible with exactly the required OUTBOUND
+  DNS + HTTPS plus read/write of its own state file under the
+  `StateDirectory` (`/var/lib/hermes-sentinel/deadman-state.json` —
+  generic public product configuration, identical in the env example
+  and the unit). The timer activates exactly that one service on the
+  frozen 60-second cadence (no OnCalendar, no Persistent replay, no
+  second daemon, fixed interval with one-second accuracy so no
+  accidental high-frequency loop can emerge). The env example is
+  deliberately non-runnable (placeholders invalid under the actual
+  loader) and contains only synthetic values. The env example, the
+  systemd EnvironmentFile path, the packaged service command and the
+  pyproject console entrypoint must stay in exact agreement —
+  deterministic packaging tests catch drift between these surfaces,
+  including that the dead-man never reuses the reporter token or any
+  Stage-E central credential (independent Stage-H Telegram
+  credential).
+
+Out of scope for H1B-2 (and NOT implemented at this stage):
+deployment to the external host, ownership/directory provisioning
+beyond the packaging contract, the H2 live outage acceptance, Stage
+H closure, any change to H1A/H1B-1 semantics, the Stage I0 Telegram
+UX redesign, retries/backoff, draining more than one notification
+per cycle, and Hermes Agent/Gateway integration.
