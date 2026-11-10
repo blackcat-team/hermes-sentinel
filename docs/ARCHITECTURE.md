@@ -2199,3 +2199,58 @@ beyond the packaging contract, the H2 live outage acceptance, Stage
 H closure, any change to H1A/H1B-1 semantics, the Stage I0 Telegram
 UX redesign, retries/backoff, draining more than one notification
 per cycle, and Hermes Agent/Gateway integration.
+
+## 34. H2 live deployment acceptance contract (Stage H2-0)
+
+H2 is the operator-executed live deployment and acceptance of the
+already-accepted H1B-2 package on the real external dead-man host.
+H2-0 adds ONLY the operator runbook
+(`docs/DEADMAN_DEPLOYMENT.md`) and this status clarification — no
+production runtime behavior, packaging, tests or CI change.
+
+H2 acceptance means, observed on the real external host:
+
+- the exact canonical code/package is installed under the dedicated
+  `hermes-sentinel-deadman` identity with the accepted packaging,
+  config boundary and state-path contract;
+- initial runtime acceptance passes: static unit verification, one
+  successful manual oneshot, correct state-file ownership/mode, an
+  active 60-second timer driving an inactive-between-runs oneshot
+  service, a healthy public GET establishing UP with no DOWN alert,
+  a secret-safe journal and no inbound listener;
+- the live DOWN acceptance: at least 3 consecutive real failed
+  probes (bounded, reversible network-path isolation of the dead-man
+  host's outbound traffic to the configured Sentinel HTTPS probe
+  destination(s) on the CONFIGURED PROBE PORT — the port parsed from
+  the configured probe URL, where implicit ordinary HTTPS resolves to
+  443 and an explicit non-default HTTPS port (e.g. 8443) is supported
+  — via one dedicated temporary nftables table covering every
+  resolved Sentinel A/AAAA destination — no code edits, no manual
+  state edits, no debounce/timer changes) produce exactly one DOWN
+  notification through the real H1B-1 HTTPS prober and the real
+  3-failure debounce, with persisted DOWN state acknowledged in the
+  same successful cycle as the successful Telegram delivery;
+- the live RECOVERY acceptance: after removing the isolation, the
+  real 2-success threshold produces exactly one RECOVERED
+  notification, state returns UP and the pending queue drains to
+  empty with no notification spam afterwards;
+- one bounded restart/durability check proves the persisted state
+  survives process boundaries without resetting to UNKNOWN;
+- the Operator returns the secret-safe, human-verifiable evidence
+  defined in the runbook's evidence contract (no bot token, chat id,
+  private endpoint or resolved address value ever returned — blocked
+  destination counts only).
+
+Current stage status:
+
+- H1A CLOSED by implementation acceptance;
+- H1B code/packaging complete (H1B-1 adapters, H1B-2 oneshot runtime
+  and generic systemd packaging accepted);
+- **H2 live deployment/acceptance NOT completed yet**;
+- Stage H remains OPEN until the Operator's live evidence is
+  accepted by the Architect. H2, H-FINAL and Stage H are NOT marked
+  complete by this document.
+
+Tracked documentation must never contain real production hostnames,
+IPs, domains, external-host identities, Telegram ids/tokens or
+account identifiers — synthetic placeholders only.
