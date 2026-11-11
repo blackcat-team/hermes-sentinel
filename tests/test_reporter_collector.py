@@ -153,11 +153,15 @@ def _classify_bash(uname: str, host_os: str) -> str:
     Windows-hosted (``nt``) Python, while a POSIX-hosted Python that
     selected a Linux bash is running NATIVE bash whose paths are
     already POSIX and must never be routed through ``wslpath``.
+    Native Darwin bash is also POSIX, but only when driven by a
+    POSIX-hosted Python; Darwin from a Windows host remains unsupported.
     """
     if "MINGW" in uname or "MSYS" in uname or "CYGWIN" in uname:
         return "msys"
     if "Linux" in uname:
         return "wsl" if host_os == "nt" else "posix"
+    if uname == "Darwin" and host_os == "posix":
+        return "posix"
     return ""
 
 
@@ -340,6 +344,9 @@ class CollectorEnvironmentTest(unittest.TestCase):
         proc = _run_bash_code("uname -s")
         self.assertEqual(proc.returncode, 0)
         self.assertTrue(proc.stdout.strip())
+        if sys.platform == "darwin":
+            self.assertEqual(proc.stdout.strip(), "Darwin")
+            self.assertEqual(BASH_FLAVOR, "posix")
 
 
 # --- bash flavor classification / path semantics (CI incident regression) --
@@ -370,6 +377,18 @@ class BashFlavorSemanticsTest(unittest.TestCase):
     def test_linux_bash_from_windows_host_is_wsl(self) -> None:
         self.assertEqual(_classify_bash("Linux", "nt"), "wsl")
 
+    def test_native_darwin_bash_on_posix_host_is_posix(self) -> None:
+        self.assertEqual(_classify_bash("Darwin", "posix"), "posix")
+
+    def test_darwin_bash_from_windows_host_is_rejected(self) -> None:
+        self.assertEqual(_classify_bash("Darwin", "nt"), "")
+
+    def test_darwin_requires_exact_uname_and_posix_host(self) -> None:
+        for uname in ("darwin", "DarwinKernel", " Darwin", "Darwin "):
+            with self.subTest(uname=uname):
+                self.assertEqual(_classify_bash(uname, "posix"), "")
+        self.assertEqual(_classify_bash("Darwin", "unknown"), "")
+
     def test_msys_family_classifies_msys_on_both_hosts(self) -> None:
         for uname in (
             "MINGW64_NT-10.0-26200",
@@ -380,18 +399,19 @@ class BashFlavorSemanticsTest(unittest.TestCase):
                 self.assertEqual(_classify_bash(uname, host_os), "msys")
 
     def test_unclassifiable_uname_is_rejected_fail_closed(self) -> None:
-        self.assertEqual(_classify_bash("Darwin", "posix"), "")
+        for host_os in ("posix", "nt"):
+            with self.subTest(host_os=host_os):
+                self.assertEqual(_classify_bash("FreeBSD", host_os), "")
         self.assertEqual(_classify_bash("", "nt"), "")
 
     def test_discovered_flavor_matches_classifier_for_local_bash(self) -> None:
         """The module-level discovery agrees with the classifier for the
-        bash actually selected on this machine (msys here, posix on the
-        GitHub Actions Linux runner)."""
-        if BASH is None:
-            self.skipTest("no real bash discovered on this machine")
-        self.assertEqual(
-            BASH_FLAVOR, _classify_bash(_probe_bash(_bash()), os.name)
-        )
+        real bash actually selected on this machine."""
+        self.assertIsNotNone(BASH)
+        uname = _probe_bash(_bash())
+        self.assertTrue(uname)
+        self.assertTrue(BASH_FLAVOR)
+        self.assertEqual(BASH_FLAVOR, _classify_bash(uname, os.name))
 
     def test_posix_flavor_passes_path_through_with_no_translator(self) -> None:
         """Native POSIX path handling performs ZERO subprocess work — no
