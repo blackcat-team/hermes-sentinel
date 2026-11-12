@@ -202,3 +202,39 @@ host:
 There is no self-update mechanism: the reporter never fetches code
 from GitHub, contains no curl/wget updater, and the systemd service
 never performs deployment.
+
+## Stage F acceptance and token rotation
+
+Use the exact [Stage F candidate and HTTPS profile](PRODUCTION_HARDENING.md).
+Before enabling the timer, confirm the installed script and units match
+that SHA, the dedicated identity owns no executable or environment file,
+and the environment file is root:root 0600. Run the single oneshot and
+correlate its success with central HTTP 204 and one new SQLite observation
+for this node. After enabling the timer, verify another fresh observation.
+
+Rotate one node at a time in a coordinated window with the central
+operator. Prepare the replacement through the private credential channel
+and keep the last approved files available for rollback.
+
+1. Stop `hermes-sentinel-reporter.timer` on the controlled reporter and
+   wait for any active oneshot to finish. Capture the central per-node
+   row count from the [central runbook](SENTINEL_DEPLOYMENT.md).
+2. Update only this node's value in central `SENTINEL_NODE_TOKENS_JSON`
+   and in reporter `SENTINEL_TOKEN`, using `sudoedit` on the respective
+   root-only files. Keep the node name and HTTPS endpoint fixed.
+   Restart `hermes-sentinel.service` locally on central to read the change.
+3. Run one reporter oneshot with the new value. Require HTTP 204 and
+   SQLite +1. With the timer still stopped, use the old value in the
+   root-only reporter file for exactly one negative attempt. Require a
+   failed oneshot, HTTP 401 and SQLite +0. Restore the new reporter file
+   immediately and confirm one more successful report.
+4. Restart the timer and check freshness. Retain only redacted statuses
+   and row deltas in the acceptance record. Revoke the superseded value
+   in the credential store after verification.
+
+If rotation cannot pass within the window, stop the test timer and
+restore the previously approved central and reporter values as a pair,
+provided the prior token is still trusted. Restart central, verify one
+protected report and then re-enable the timer. If the old token must
+stay revoked, keep that reporter stopped until a valid replacement is
+verified. Preserve the central SQLite database during either recovery.

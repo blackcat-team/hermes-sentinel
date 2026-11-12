@@ -230,9 +230,10 @@ The accepted B5 listener is **plaintext HTTP**. Stage E9 implements no
 TLS termination and no reverse proxy configuration. The safe checked-in
 example binds `127.0.0.1`; do NOT expose the plaintext B5 listener
 directly to the public Internet. Production HTTPS/reverse-proxy
-termination remains Stage F — until then, this packaging alone is NOT
-a claim that remote production reporters can safely reach this backend
-from the Internet.
+termination belongs to [Stage F](PRODUCTION_HARDENING.md). E9 alone does
+not claim that remote production reporters can safely reach the plaintext
+backend from the Internet. For Stage F use `127.0.0.1` and put the SQLite
+path inside `/var/lib/hermes-sentinel`.
 
 ## Smoke test and enablement
 
@@ -295,3 +296,99 @@ For an update to a newer accepted repository state:
 
 There is no self-update and no automatic rollback framework in this
 stage.
+
+## Stage F acceptance on the central host
+
+Apply the [production hardening procedure](PRODUCTION_HARDENING.md) from
+the same approved SHA. Before opening HTTPS, check that the service
+process uses the dedicated identity and expected executable, that the
+application and unit files are root-owned, that the central environment
+file is root:root 0600, and that SQLite and its sidecars are accessible
+only to the intended service and operator. Check numeric modes with
+`stat`, and the backend binding with `sudo ss -ltnp` locally. Keep these
+raw outputs private and record only the pass/fail observations.
+
+### Read-only heartbeat evidence
+
+With the selected reporter timer stopped, collect this before and after
+one attempt. Type the private configured node name at the hidden prompt.
+Use the installed, approved SQLite path as the argument. The command
+prints a count and the latest central receive timestamp for that node.
+
+<!-- stage-f-sqlite-observation -->
+```bash
+(
+set +x
+set -o pipefail
+read -rsp 'Acceptance node: ' sentinel_acceptance_node || exit 1
+printf '\n'
+printf '%s\n' "$sentinel_acceptance_node" |
+    sudo /opt/hermes-sentinel/venv/bin/python -c '
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+from hermes_sentinel.persistence.repository import parse_timestamp
+
+node = sys.stdin.readline().rstrip("\n")
+if not node:
+    sys.exit("acceptance node is required")
+uri = Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"
+try:
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        count, received = db.execute(
+            "SELECT COUNT(*), MAX(received_at) FROM heartbeat_observation WHERE node = ?",
+            (node,),
+        ).fetchone()
+        latest = parse_timestamp(received).isoformat() if received else "none"
+except (sqlite3.Error, ValueError):
+    sys.exit("could not read heartbeat evidence")
+print(f"rows={count} latest_received_at={latest}")
+' /var/lib/hermes-sentinel/sentinel.sqlite3
+)
+```
+
+An absent database or unreadable schema fails this check. A missing node
+observation is expected only before the first controlled heartbeat.
+For a status check later in the window, compare the timestamp with the
+configured freshness threshold using the central clock.
+
+### Confinement and supervision
+
+Capture selected systemd fields locally, keeping the PID private.
+
+```bash
+systemctl show hermes-sentinel.service \
+    -p ActiveState -p SubState -p Result -p ExecMainStatus -p NRestarts -p MainPID
+```
+
+For the filesystem check, create disposable markers on the test central
+host. Use a readable regular file under a test home directory and a
+writable target under `/var/tmp`. Verify the dedicated user can read or
+write them outside confinement. Enter the active unit's mount namespace
+with `nsenter --target <MainPID> --mount` and drop to the service user with
+`setpriv --reuid=hermes-sentinel --regid=hermes-sentinel --clear-groups`
+before attempting those same operations. Require both operations to fail
+inside the namespace and remove the markers. Check that `CapInh`,
+`CapPrm`, `CapEff`, `CapBnd` and `CapAmb` are all zero in the actual
+process's `/proc/<MainPID>/status`. Use the real reporter, TCP probes and
+Stage E delivery to verify database writes and egress in the service.
+
+In the approved test window, send `sudo systemctl kill --signal=SIGTERM
+hermes-sentinel.service`. Require successful exit and no new main process
+after the restart interval. Start it again and verify the same SQLite
+rows are present. For the E4/E5 fault exercise, make only the dedicated
+test notification destination fail, then trigger a fresh controlled
+DOWN. A delivery exception aborts the cycle and exits the process.
+Observe a nonzero exit and a systemd restart after `RestartSec=5s`.
+Restore egress within the agreed window, check that the service is
+stable, and prove successful notification with a new controlled
+transition. No missed notification is replayed by E4/E5.
+
+Test invalid E6 configuration in a separate controlled run by replacing
+one required setting with an invalid synthetic value using the root-only
+environment file. Require startup failure with no value disclosed.
+Stop the failing unit, restore the approved file, start and verify
+the retained database. Review journal diagnostics in the private console
+and export only the error category, time and exit status.
