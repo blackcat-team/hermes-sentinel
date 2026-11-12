@@ -23,7 +23,9 @@ def test_drop_in_adds_only_confinement() -> None:
             "PrivateDevices": ["yes"],
             "ProtectKernelTunables": ["yes"],
             "ProtectControlGroups": ["yes"],
-            "ReadOnlyPaths": ["/tmp /var/tmp -/dev/shm"],
+            "ReadOnlyPaths": [
+                "/tmp /var/tmp -/dev/shm -/dev/mqueue -/dev/hugepages -/dev/pts",
+            ],
             "CapabilityBoundingSet": [""],
             "AmbientCapabilities": [""],
             "RestrictNamespaces": ["yes"],

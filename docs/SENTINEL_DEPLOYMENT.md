@@ -363,14 +363,15 @@ systemctl show hermes-sentinel.service \
     -p ActiveState -p SubState -p Result -p ExecMainStatus -p NRestarts -p MainPID
 ```
 
-For the filesystem check, create disposable markers on the test central
-host. Use a readable regular file under a test home directory and a
-writable target under `/var/tmp`. Verify the dedicated user can read or
-write them outside confinement. Enter the active unit's mount namespace
-with `nsenter --target <MainPID> --mount` and drop to the service user with
-`setpriv --reuid=hermes-sentinel --regid=hermes-sentinel --clear-groups`
-before attempting those same operations. Require both operations to fail
-inside the namespace and remove the markers. Check that `CapInh`,
+On the test central host, prepare a disposable readable file under a
+test home directory and a disposable writable file in a separate directory
+under `/var/lib`, outside `StateDirectory`. Confirm the service user can
+read both files and write the latter outside confinement. Use
+`nsenter --target <MainPID> --mount` and drop to the service user with
+`setpriv --reuid=hermes-sentinel --regid=hermes-sentinel --clear-groups`.
+Inside that namespace require the `/var/lib` marker to remain readable but
+reject a write as read-only. Require the home marker to be unreadable.
+Remove both markers after the check. Check that `CapInh`,
 `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` are all zero in the actual
 process's `/proc/<MainPID>/status`. Use the real reporter, TCP probes and
 Stage E delivery to verify database writes and egress in the service.
@@ -386,9 +387,11 @@ Restore egress within the agreed window, check that the service is
 stable, and prove successful notification with a new controlled
 transition. No missed notification is replayed by E4/E5.
 
-Test invalid E6 configuration in a separate controlled run by replacing
-one required setting with an invalid synthetic value using the root-only
-environment file. Require startup failure with no value disclosed.
-Stop the failing unit, restore the approved file, start and verify
-the retained database. Review journal diagnostics in the private console
-and export only the error category, time and exit status.
+Test invalid E6 configuration in a separate controlled run. Set
+`SENTINEL_LISTEN_PORT=STAGE_F_INVALID_PORT_MARKER` in the test instance's
+root-only environment file. Require a failed startup with the strict
+decimal-integer diagnostic and check that the marker is absent from
+the journal for that window. Stop the failing unit, restore the approved
+file, start and verify the retained database. Review journal diagnostics
+in the private console and export only the error category, time and exit
+status.

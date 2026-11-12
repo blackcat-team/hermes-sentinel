@@ -9,6 +9,7 @@ import re
 import socket
 import ssl
 import subprocess
+from threading import Barrier
 import time
 
 import pytest
@@ -172,8 +173,16 @@ def test_real_tls_reporter_and_deadman_probe(ingress: Ingress) -> None:
     status, headers, body = b5._parse_response(ingress.exchange(probe_request))
     assert status == 405 and ("Allow", "POST") in headers and body == b""
     assert ingress.probe().probe() is DeadManProbeOutcome.HEALTHY
+    framed_get = ingress.request(
+        method="GET", body=b"", content_length=1000, headers=(),
+        extra_lines=(b"Expect: 100-continue",),
+    )
+    started = time.monotonic()
+    status, headers, body = b5._parse_response(ingress.exchange(framed_get))
+    assert status == 405 and ("Allow", "POST") in headers and body == b""
+    assert time.monotonic() - started < 2
     assert ingress.rows() == 0
-    print("verified GET 405, Allow POST, empty body, H1B healthy, SQLite +0")
+    print("verified GET 405, Allow POST, empty body, no interim 100, H1B healthy, SQLite +0")
 
     reporter = subprocess.run(
         ["bash", str(ROOT / "scripts/sentinel-report.sh")],
@@ -257,8 +266,24 @@ def test_malformed_requests_leave_sqlite_unchanged(ingress: Ingress) -> None:
         assert all(marker not in response for marker in (secret, query, body_marker)), label
         print(f"{label}: HTTP {status}, SQLite +0")
 
-    assert b5._parse_response(ingress.exchange(ingress.request()))[0] == 204
-    assert ingress.rows() == 1
+    # Four required fields plus 96 fields normally removed by the proxy.
+    over_limit = ingress.request(extra_lines=(b"Keep-Alive: x",) * 96)
+    assert b5._parse_response(ingress.backend._exchange(over_limit))[0] == 431
+    assert b5._parse_response(ingress.exchange(over_limit))[0] == 431
+    assert ingress.rows() == 0
+    print("100 fields including hop-by-hop headers: direct B5 and ingress 431, SQLite +0")
+
+    at_limit = ingress.request(extra_lines=(b"X-Test: x",) * 95)
+    http10_at_limit = (
+        ingress.request(extra_lines=(b"X-Test: x",) * 96)
+        .replace(b" HTTP/1.1\r\n", b" HTTP/1.0\r\n", 1)
+        .replace(b"Host: localhost\r\n", b"", 1)
+    )
+    for request in (at_limit, http10_at_limit):
+        assert b5._parse_response(ingress.backend._exchange(request))[0] == 204
+        assert b5._parse_response(ingress.exchange(request))[0] == 204
+    assert ingress.rows() == 4
+    print("99 ordinary fields: direct B5 and ingress 204, SQLite +1 per request")
     logs = ingress.access_log.read_bytes() + ingress.startup_log.read_bytes()
     assert all(marker not in logs for marker in (secret, query, body_marker))
     assert all(
@@ -300,13 +325,22 @@ def test_shared_nat_burst_and_rate_limit(ingress: Ingress) -> None:
     def status(_: int) -> int:
         return b5._parse_response(ingress.exchange(request))[0]
 
+    ready = Barrier(10)
+
+    def simultaneous_status(_: int) -> int:
+        with ingress.connect() as connection:
+            ready.wait(timeout=4)
+            connection.sendall(request)
+            return b5._parse_response(b5._read_all(connection))[0]
+
+    with ThreadPoolExecutor(max_workers=10) as clients:
+        normal = list(clients.map(simultaneous_status, range(10)))
     with ThreadPoolExecutor(max_workers=4) as clients:
-        normal = list(clients.map(status, range(10)))
         excess = list(clients.map(status, range(90)))
     assert normal == [204] * 10
     assert set(excess) == {204, 429}
     assert ingress.rows() == (normal + excess).count(204)
     print(
-        f"shared NAT: {len(normal)} accepted in normal burst, "
+        f"shared NAT: {len(normal)} simultaneous requests accepted, "
         f"{excess.count(429)} rate-limited with SQLite +0"
     )

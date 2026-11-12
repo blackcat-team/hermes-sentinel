@@ -9,6 +9,9 @@ import sys
 
 import pytest
 import test_http_server as b5
+import test_settings as e6
+
+from hermes_sentinel.settings import CentralSettingsError, load_central_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 HARDENING = ROOT / "docs/PRODUCTION_HARDENING.md"
@@ -123,3 +126,11 @@ def test_evidence_template_opens_each_gate_and_links_operator_procedures() -> No
     ))
     assert f"]({HARDENING.name})" in CENTRAL.read_text()
     assert f"]({HARDENING.name})" in REPORTER.read_text()
+
+
+def test_documented_invalid_environment_value_is_redacted() -> None:
+    marker = "STAGE_F_INVALID_PORT_MARKER"
+    assert f"SENTINEL_LISTEN_PORT={marker}" in CENTRAL.read_text()
+    with pytest.raises(CentralSettingsError, match="must be a strict decimal integer") as error:
+        load_central_settings({**e6._base_env(), "SENTINEL_LISTEN_PORT": marker})
+    assert marker not in str(error.value)

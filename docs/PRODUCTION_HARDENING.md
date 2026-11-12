@@ -28,8 +28,11 @@ The ingress preserves the origin-form path, token and buffered body on the
 ordinary proxy path. The perimeter admits only the exact origin-form target
 so URI normalization cannot turn an alias into a heartbeat. B4 owns backend
 route and method semantics and B3 owns authentication. The Lua check runs
-before proxy normalization on the heartbeat POST. It uses structured header presence to reject `Expect`
-(including empty) and `Transfer-Encoding` and requires `Content-Length`.
+before proxy normalization. It enforces B5's 99-field limit before
+hop-by-hop fields can be removed and rejects `Transfer-Encoding`.
+On a heartbeat POST it rejects any `Expect` and requires `Content-Length`.
+Other methods with admissible framing reach B4 without waiting for a body
+or sending an interim 100 response.
 It checks the bounded original header lines for malformed fields and rejects a
 token with trailing whitespace before NGINX can trim it. The NGINX parser can
 reject conflicting framing earlier. A rejected request must produce no
@@ -40,14 +43,25 @@ The profile buffers at most 16 KiB per body before proxying. Limits are
 20 requests/s plus a 40-request burst and 16 active requests per source IP,
 and 100 requests/s plus a 100-request burst and 64 active requests across the
 vhost. Excess admitted headers get 429. Source IP is the immediate peer.
-Check the largest expected simultaneous reporter batch behind a shared NAT
-and stagger timers if necessary. In-flight connections with incomplete
+The lab sends ten requests at the same instant from one IP after completing
+TLS handshakes. Check the largest expected simultaneous reporter batch
+behind a shared NAT and stagger timers if necessary. In-flight connections with incomplete
 headers are governed by the NGINX worker connection budget (512, including
 upstream connections) and header deadline, before the per-IP active request
-counter applies. The header deadline is 5 s, the upstream connect timeout
-is 1 s, and body, send and upstream read/write idle timeouts are 5 s.
-A client trickling bytes below the idle timeout can retain an ingress slot.
-Full buffering keeps that request off the serial B5 listener.
+counter applies. The header deadline is 5 s. The upstream connect window
+is 3 s to allow a TCP SYN retransmission if B5's listen queue fills briefly.
+Body, client send and upstream write idle timeouts are 5 s. The upstream
+read idle timeout is 15 s. A client trickling bytes below the body idle
+timeout can retain an ingress slot. Full buffering keeps that request off
+the serial B5 listener.
+
+E5 serves B5 and runs E4 on one thread. Check the longest expected
+monitoring pause under the configured inventory, DNS/TCP timeouts and
+Telegram delivery. Repeat the expected NAT burst while monitoring is active.
+Require the normal reporter to finish within its 20 s total timeout and the
+upstream to respond within the ingress deadline. Stagger reporter timers
+and review the approved monitor settings if the host profile exceeds those
+bounds.
 
 Access logs contain only response status, elapsed seconds and upstream status.
 NGINX error logs go to `/dev/null` because even parser and upstream errors
@@ -79,7 +93,7 @@ sudo systemctl cat hermes-sentinel.service
 
 The base unit supplies `StateDirectory=hermes-sentinel`, which systemd leaves
 writable under `ProtectSystem=strict`. The service's private temporary
-directories and shared-memory filesystem are read-only when present.
+directories and auxiliary device filesystems are read-only when present.
 Home directories and physical devices are hidden. The service has empty
 bounding and ambient capability sets, cannot create namespaces, and may
 open UNIX, IPv4 and IPv6 sockets. System CA and resolver files are readable.
@@ -173,11 +187,24 @@ test -z "$checkout_status" ||
 ```
 
 Record the source SHA and artifact SHA-256 at build and installation.
-Check the installed reporter against `scripts/sentinel-report.sh` with
-`cmp -s`. For central, install the verified wheel from that checkout into
-the root-managed venv and compare its installed `hermes_sentinel` package
-with `src/hermes_sentinel`, ignoring `__pycache__`. A source SHA alone
-does not identify a previously installed executable.
+Check the installed reporter and systemd artifacts against the candidate
+files with `cmp -s`, and the rendered NGINX configuration against its
+reviewed digest. For central, compare the installed `hermes_sentinel`
+package with `src/hermes_sentinel`, ignoring `__pycache__`, after installing
+the reviewed wheel. Record the wheel SHA-256 and successful installation
+together with the source SHA, including when the package version is unchanged.
+
+On an update or rollback, stop the affected services and reporter timer
+before replacing executables. Preserve existing root-only environment
+files and apply only the reviewed configuration changes. Install the
+synthetic environment examples only during initial provisioning. On both
+update and rollback, verify the selected wheel's SHA-256 against the
+approved record and reinstall explicitly from the local artifact.
+
+```bash
+sudo /opt/hermes-sentinel/venv/bin/pip install --no-index --no-deps \
+    --force-reinstall /absolute/path/to/reviewed-wheel.whl
+```
 
 1. Run the local Linux acceptance above on that SHA. Record NGINX/module
    and systemd versions, the image ID and checksums.
@@ -246,9 +273,15 @@ for subsequent notification checks. Stage D state memory is process-local.
   accepted replacement and has a working timer.
 - Rotate Stage E Telegram credentials in the central root-only environment
   file and verify delivery with a new controlled transition after restart.
-  Stage H credentials belong only on the independent dead-man host under
-  its [runbook](DEADMAN_DEPLOYMENT.md). Track both credential IDs privately
-  and revoke superseded credentials after the corresponding verification.
+  Track credential IDs privately and revoke superseded credentials after
+  verification. Keep Stage H credentials separate. For an authorized Stage H
+  rotation on the independent host, stop the dead-man timer and let the
+  active oneshot finish. Update only the Telegram fields in the root-only
+  `/etc/hermes-sentinel/deadman.env`. Verify one normal oneshot and restart the
+  timer. Prove delivery on a fresh, approved incident using the
+  [dead-man runbook](DEADMAN_DEPLOYMENT.md). If rotation fails, stop the
+  timer, restore the last trusted environment file and verify before
+  resuming. Preserve the dead-man state and leave H2 acceptance separate.
 - For TLS rotation, stage the new chain/key with the same protected
   ownership. Validate with `nginx -t`, reload and independently verify
   the served chain, hostname and validity window. Repeat the reporter POST

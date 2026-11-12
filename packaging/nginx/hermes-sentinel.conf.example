@@ -57,19 +57,27 @@ http {
             limit_conn sentinel_conn_total 64;
             limit_conn_status 429;
 
-            rewrite_by_lua_block {
-                if ngx.req.get_method() ~= "POST" then
-                    return
+            access_by_lua_block {
+                -- B5's parser counts the terminating blank line in its 100-line
+                -- limit. Apply the field limit before nginx removes any headers.
+                local headers, header_error = ngx.req.get_headers(99)
+                if header_error then
+                    return ngx.exit(431)
                 end
-
-                -- Inspect structured headers before nginx's proxy removes Expect
-                -- or decodes chunked bodies. Empty fields still count as present.
-                local headers = ngx.req.get_headers(0)
-                if headers["expect"] ~= nil then
+                local heartbeat = ngx.req.get_method() == "POST"
+                -- nginx would otherwise hide Expect or decode chunked bodies
+                -- before proxying. Empty fields still count as present.
+                if heartbeat and headers["expect"] ~= nil then
                     return ngx.exit(417)
                 end
                 if headers["transfer-encoding"] ~= nil then
                     return ngx.exit(400)
+                end
+                if not heartbeat then
+                    -- B5 hands other methods to B4 without reading a body.
+                    ngx.req.clear_header("Expect")
+                    ngx.req.clear_header("Content-Length")
+                    return
                 end
                 if headers["content-length"] == nil then
                     return ngx.exit(411)
@@ -108,12 +116,15 @@ http {
             }
 
             proxy_http_version 1.1;
-            proxy_set_header Connection close;
+            # B5 closes each connection itself. Avoid adding a field at the
+            # header-count limit, including Host for a valid HTTP/1.0 request.
+            proxy_set_header Connection "";
+            proxy_set_header Host $http_host;
             proxy_pass_request_headers on;
             proxy_request_buffering on;
-            proxy_connect_timeout 1s;
+            proxy_connect_timeout 3s;
             proxy_send_timeout 5s;
-            proxy_read_timeout 5s;
+            proxy_read_timeout 15s;
             proxy_next_upstream off;
             proxy_cache off;
             proxy_intercept_errors off;
