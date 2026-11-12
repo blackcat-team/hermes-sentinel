@@ -1,0 +1,123 @@
+# Complete nginx.conf for a dedicated Sentinel ingress. Render the example
+# hostname, certificate paths and loopback port before installing.
+load_module /usr/lib/nginx/modules/ndk_http_module.so;
+load_module /usr/lib/nginx/modules/ngx_http_lua_module.so;
+
+user www-data;
+worker_processes 1;
+pid /run/nginx.pid;
+# Even parser/TLS/upstream errors can include request-controlled text.
+error_log /dev/null crit;
+
+events {
+    worker_connections 512;
+}
+
+http {
+    log_format sentinel '$status $request_time $upstream_status';
+    access_log /var/log/nginx/hermes-sentinel-access.log sentinel;
+    server_tokens off;
+    ignore_invalid_headers off;
+
+    limit_req_zone $binary_remote_addr zone=sentinel_rate_ip:1m rate=20r/s;
+    limit_req_zone $server_name zone=sentinel_rate_total:1m rate=100r/s;
+    limit_conn_zone $binary_remote_addr zone=sentinel_conn_ip:1m;
+    limit_conn_zone $server_name zone=sentinel_conn_total:1m;
+
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        server_name sentinel.example.invalid;
+        ssl_certificate /etc/nginx/hermes-sentinel/fullchain.pem;
+        ssl_certificate_key /etc/nginx/hermes-sentinel/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        client_max_body_size 16k;
+        client_body_buffer_size 16k;
+        client_header_buffer_size 1k;
+        large_client_header_buffers 4 8k;
+        client_header_timeout 5s;
+        client_body_timeout 5s;
+        send_timeout 5s;
+        keepalive_timeout 0;
+        lingering_time 5s;
+        lingering_timeout 1s;
+
+        # Admit only the exact origin-form target. In particular, nginx
+        # removes absolute-form authority and the upstream HTTP parser can
+        # collapse repeated leading slashes before B4 sees the path.
+        if ($request_uri != "/v1/heartbeat") { return 404; }
+        if ($request !~ "^[^ ]+ +/") { return 404; }
+
+        location / {
+            limit_req zone=sentinel_rate_ip burst=40 nodelay;
+            limit_req zone=sentinel_rate_total burst=100 nodelay;
+            limit_req_status 429;
+            limit_conn sentinel_conn_ip 16;
+            limit_conn sentinel_conn_total 64;
+            limit_conn_status 429;
+
+            rewrite_by_lua_block {
+                if ngx.req.get_method() ~= "POST" then
+                    return
+                end
+
+                -- Inspect structured headers before nginx's proxy removes Expect
+                -- or decodes chunked bodies. Empty fields still count as present.
+                local headers = ngx.req.get_headers(0)
+                if headers["expect"] ~= nil then
+                    return ngx.exit(417)
+                end
+                if headers["transfer-encoding"] ~= nil then
+                    return ngx.exit(400)
+                end
+                if headers["content-length"] == nil then
+                    return ngx.exit(411)
+                end
+
+                -- nginx can materialize a colonless line as an empty header and
+                -- trim a token's trailing spaces. Validate the bounded original
+                -- header block before either normalization can hide bad input.
+                local raw = ngx.req.raw_header(true)
+                local start = 1
+                while true do
+                    local eol = raw:find("\r\n", start, true)
+                    if not eol then
+                        return ngx.exit(400)
+                    end
+                    if eol == start then
+                        return
+                    end
+                    local field = raw:sub(start, eol - 1)
+                    local colon = field:find(":", 1, true)
+                    if not colon or colon == 1 then
+                        return ngx.exit(400)
+                    end
+                    local name = field:sub(1, colon - 1)
+                    local value = field:sub(colon + 1)
+                    if name:find("[^!#$%%&'*+.^_\096|~%w%-]")
+                        or value:find("%z") or value:find("[\001-\008\010-\031\127]") then
+                        return ngx.exit(400)
+                    end
+                    if name:lower() == "x-sentinel-token"
+                        and value:find("[ \t]$") then
+                        return ngx.exit(401)
+                    end
+                    start = eol + 2
+                end
+            }
+
+            proxy_http_version 1.1;
+            proxy_set_header Connection close;
+            proxy_pass_request_headers on;
+            proxy_request_buffering on;
+            proxy_connect_timeout 1s;
+            proxy_send_timeout 5s;
+            proxy_read_timeout 5s;
+            proxy_next_upstream off;
+            proxy_cache off;
+            proxy_intercept_errors off;
+            proxy_pass http://127.0.0.1:8080;
+        }
+    }
+}
