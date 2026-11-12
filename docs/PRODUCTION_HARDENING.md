@@ -59,6 +59,46 @@ For ingress rollback, restore the previous approved TLS configuration and
 validate it before reloading. Close public ingress if a verified previous
 configuration is unavailable. Keep B5 bound to loopback and preserve SQLite.
 
+## F2. Central service confinement
+
+Install the [drop-in](../packaging/systemd/hermes-sentinel.service.d/10-hardening.conf)
+alongside the E9 service on Ubuntu. Use the dedicated service user, the
+root-managed application and environment file, the loopback bind and a
+database path inside the service's StateDirectory.
+
+```bash
+sudo install -d -o root -g root -m 0755 \
+    /etc/systemd/system/hermes-sentinel.service.d
+sudo install -o root -g root -m 0644 \
+    packaging/systemd/hermes-sentinel.service.d/10-hardening.conf \
+    /etc/systemd/system/hermes-sentinel.service.d/10-hardening.conf
+sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/hermes-sentinel.service
+sudo systemctl cat hermes-sentinel.service
+```
+
+The base unit supplies `StateDirectory=hermes-sentinel`, which systemd leaves
+writable under `ProtectSystem=strict`. The service's private temporary
+directories and shared-memory filesystem are read-only when present.
+Home directories and physical devices are hidden. The service has empty
+bounding and ambient capability sets, cannot create namespaces, and may
+open UNIX, IPv4 and IPv6 sockets. System CA and resolver files are readable.
+Check the actual application path, identity, state directory and egress
+before accepting the effective unit.
+
+In the target service context, prove that SQLite remains writable and
+survives restart. Check that a write to an operator-prepared, otherwise
+writable path outside the state directory and a read of an otherwise
+readable home sentinel file both fail. Verify the process capability masks
+in `/proc/<MainPID>/status`. Confirm actual DNS, configured TCP probes and
+outbound Telegram TLS. Exercise normal SIGTERM and abnormal exit using the
+supervision checks in the [central runbook](SENTINEL_DEPLOYMENT.md).
+
+For rollback, remove only
+`/etc/systemd/system/hermes-sentinel.service.d/10-hardening.conf`, restore the
+previous approved configuration, reload systemd and verify the effective
+unit before restart. Preserve SQLite and keep the public backend closed.
+
 ## Local Linux acceptance
 
 Run the canonical `python tools/verify.py` with Python 3.11 and the pinned
@@ -95,3 +135,17 @@ and status/SQLite row-delta output. The suite validates the rendered effective
 configuration and uses the real reporter and H1B prober with verified TLS.
 It covers refusal cases, incomplete bodies, rate and connection limits, and
 the response to loss of B5. External reachability is checked during rollout.
+
+In the same disposable lab container, install the real console entrypoint
+and check the effective service with the systemd tools:
+
+```bash
+python3.11 -m venv --system-site-packages /opt/hermes-sentinel/venv
+/opt/hermes-sentinel/venv/bin/pip install --no-build-isolation --no-deps .
+systemd-analyze --version
+HERMES_STAGE_F_LIVE=1 python3.11 -m pytest -q -s tests/test_stage_f_systemd.py
+```
+
+These checks inspect the packaged unit and drop-in and use an invalid
+ExecStart as a negative control. The effective sandbox and lifecycle are
+exercised under the target Ubuntu service manager during rollout.
