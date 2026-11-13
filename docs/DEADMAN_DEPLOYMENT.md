@@ -11,8 +11,9 @@ must resolve at runtime:
 
 | Placeholder            | Meaning                                            |
 |------------------------|----------------------------------------------------|
-| `<repository-remote>`  | operator's trusted source of the canonical repository |
-| `<checkout-dir>`       | local checkout of the exact accepted commit         |
+| `APPROVED_SHA`        | full reviewed v1.0 release commit                   |
+| `SOURCE_DIR`          | verified source directory from the release archive  |
+| `RELEASE_WHEEL`       | absolute path to the verified shared wheel          |
 | `<DEADMAN_BOT_TOKEN>`  | independent Stage-H Telegram bot token             |
 | `<DEADMAN_CHAT_ID>`    | Telegram chat id                                   |
 | `<DEADMAN_THREAD_ID>`  | optional topic/thread id                           |
@@ -43,15 +44,21 @@ Every command below runs **locally on the external dead-man host**.
 
 ## 1. Pre-flight
 
-Before installing anything, verify on the dead-man host:
+Begin this runbook after the Architect records central MVP and Stage F
+acceptance for `APPROVED_SHA` in the
+[consolidated release record](H_FINAL_ACCEPTANCE.md#6-h-final-evidence-and-completion-criteria).
+Keep the dead-man timer stopped during preparation. Before installing
+anything, verify on the dead-man host:
 
 - Ubuntu Linux, systemd as init (`ps -p 1 -o comm=`);
 - Python >= 3.11 with venv/pip capability (`python3 --version`);
 - nftables present (`nft --version`); the acceptance isolation below is
   nftables-only;
 - DNS resolution works (`resolvectl status`);
-- outbound HTTPS works to both `api.telegram.org` and the Sentinel
-  endpoint host (any HTTP response code proves the path);
+- direct outbound HTTPS works to both `api.telegram.org` and the Sentinel
+  endpoint host. Confirm the effective service has a direct Sentinel path
+  without a forward proxy, and that isolating its endpoint addresses/port
+  will leave Telegram reachable;
 - the host is genuinely **outside the central Sentinel failure domain**:
   different physical/virtual machine, different provider or power/network
   domain than the central Sentinel VDS — this is the whole point of H2;
@@ -60,92 +67,70 @@ Before installing anything, verify on the dead-man host:
   echo the probe target variables or resolved addresses into collected
   evidence.
 
-## 2. Install (exact accepted runtime SHA)
+## 2. Install the approved release
 
-The deployment installs EXACTLY this accepted runtime revision:
+1. Run the [release verification](H_FINAL_ACCEPTANCE.md#verify-on-each-installation-host)
+   using the same `APPROVED_SHA` and reviewed manifest digest as central.
+   Use its verified `RELEASE_WHEEL` and `SOURCE_DIR` below. On updates stop
+   the timer and wait for the active oneshot to finish before replacement.
 
-    37c2e1d6a4b484dcc29acc739ed16f44ed510b4e
-
-1. Obtain the canonical repository and detach at that exact commit:
-
-   ```bash
-   git clone <repository-remote> <checkout-dir>
-   git -C <checkout-dir> checkout --detach \
-       37c2e1d6a4b484dcc29acc739ed16f44ed510b4e
-   ```
-
-2. Verify fail-closed that HEAD is exactly that SHA before installing:
-
-   ```bash
-   test "$(git -C <checkout-dir> rev-parse HEAD)" = \
-       37c2e1d6a4b484dcc29acc739ed16f44ed510b4e \
-       || { echo "HEAD is not the accepted SHA" >&2; exit 1; }
-   ```
-
-3. Create the dedicated system identity (never `root` or any shared
-   account):
+2. Create the dedicated system identity during initial provisioning:
 
    ```bash
    sudo useradd --system --no-create-home --shell /usr/sbin/nologin \
        hermes-sentinel-deadman
    ```
 
-4. Create the application root and virtualenv at the path the accepted
-   service unit expects
-   (`ExecStart=/opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman`),
-   and install the Python project FROM THAT EXACT CHECKOUT:
+3. Create the root-managed application and venv during initial provisioning.
+   Install the same verified wheel used by central, including on updates.
+   Stop on any failed command.
 
    ```bash
    sudo install -d -o root -g root -m 0755 /opt/hermes-sentinel
    sudo python3 -m venv /opt/hermes-sentinel/venv
-   sudo /opt/hermes-sentinel/venv/bin/pip install <checkout-dir>
    ```
-
-   No release/wheel publishing infrastructure is introduced — the
-   checkout itself is the install source.
-
-5. Verify fail-closed that the console script exists:
 
    ```bash
-   test -x /opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman \
-       || { echo "console script MISSING" >&2; exit 1; } \
-       && echo "console script present"
+   sudo /opt/hermes-sentinel/venv/bin/pip install --no-index --no-deps \
+       --force-reinstall "${RELEASE_WHEEL:?}" &&
+   test -x /opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman
    ```
 
-6. Install the systemd units and the env example FROM THE SAME checkout
-   (the packaging in the deployed runtime revision is authoritative):
+   Compare the installed package contents against `SOURCE_DIR` as in the
+   release verification and record the wheel digest.
+
+4. Install and compare the units from the verified source directory.
 
    ```bash
-   sudo install -o root -g root -m 0644 \
-       <checkout-dir>/packaging/systemd/hermes-sentinel-deadman.service \
-       /etc/systemd/system/hermes-sentinel-deadman.service
-   sudo install -o root -g root -m 0644 \
-       <checkout-dir>/packaging/systemd/hermes-sentinel-deadman.timer \
-       /etc/systemd/system/hermes-sentinel-deadman.timer
-   sudo systemctl daemon-reload
+   (
+       set -euo pipefail
+       for unit in hermes-sentinel-deadman.service hermes-sentinel-deadman.timer; do
+           source_unit="${SOURCE_DIR:?}/packaging/systemd/$unit"
+           installed_unit="/etc/systemd/system/$unit"
+           sudo install -o root -g root -m 0644 "$source_unit" "$installed_unit"
+           cmp -s "$source_unit" "$installed_unit"
+       done
+       sudo systemctl daemon-reload
+   )
    ```
 
-7. Provision the state directory required by the packaging
-   (`StateDirectory=hermes-sentinel`, `StateDirectoryMode=0750`;
-   systemd creates `/var/lib/hermes-sentinel` on first service start,
-   owned by `hermes-sentinel-deadman:hermes-sentinel-deadman`). If it
-   already exists, fix it explicitly:
-
-   ```bash
-   sudo install -d -o hermes-sentinel-deadman \
-       -g hermes-sentinel-deadman -m 0750 /var/lib/hermes-sentinel
-   ```
+5. Keep any existing ledger. Systemd creates `/var/lib/hermes-sentinel`
+   through `StateDirectory` with the dedicated identity and mode 0750.
+   Verify the existing directory's owner and mode before starting an update.
 
 ## 3. Config
 
-Create the environment file from the safe synthetic example in the same
-checkout:
+On initial provisioning, create the environment file from the verified
+source directory. On updates, preserve the existing protected file and
+apply reviewed configuration changes with `sudoedit`.
 
 ```bash
 sudo install -d -o root -g root -m 0750 /etc/hermes-sentinel
-sudo install -o root -g root -m 0600 \
-    <checkout-dir>/packaging/systemd/deadman.env.example \
-    /etc/hermes-sentinel/deadman.env
+if ! sudo test -e /etc/hermes-sentinel/deadman.env; then
+    sudo install -o root -g root -m 0600 \
+        "${SOURCE_DIR:?}/packaging/systemd/deadman.env.example" \
+        /etc/hermes-sentinel/deadman.env
+fi
 sudoedit /etc/hermes-sentinel/deadman.env
 ```
 
@@ -167,7 +152,9 @@ Rules:
 - the bot token is the **independent Stage-H dead-man token** — never
   the reporter token and never the central Sentinel's Stage-E bot token;
   double-check the credential manager entry before saving;
-- use `sudoedit`, never `echo`/`cat` redirection with real values;
+- use `sudoedit` and keep the probe URL as one unquoted assignment with
+  no surrounding whitespace, as in the example. Section 6.1 reads that
+  single assignment;
 - no real value is ever committed to the repository.
 
 ## 4. Secret-safe state summary (strict accepted decoder, read-only)
@@ -240,12 +227,13 @@ comments:
 
    (no output and exit 0 is a pass).
 
-2. ONE manual smoke invocation (this is the only manual start of the
-   whole acceptance — all threshold sequences later are timer-driven):
+2. Run one manual smoke invocation with the timer stopped. All subsequent
+   acceptance observations, including durability, use timer invocations.
 
    ```bash
    sudo systemctl start hermes-sentinel-deadman.service
-   systemctl status hermes-sentinel-deadman.service
+   systemctl show hermes-sentinel-deadman.service \
+       -p Result -p ExecMainStatus -p ActiveState
    ```
 
    Expect a successful oneshot result (`ExecMainStatus=0`). The first
@@ -280,9 +268,10 @@ comments:
    activations — never continuously active — and
    `User=hermes-sentinel-deadman`.
 
-5. Establish the healthy UP baseline with timer cycles only: after 2–3
-   timer activations, the state summary shows `state=UP`,
-   `pending_count=0`, and NO Telegram message has arrived.
+5. Establish the healthy baseline over three consecutive timer
+   activations. After each, the state summary must show `state=UP`,
+   `consecutive_failures=0` and `pending_count=0`, with no new Telegram
+   message. This also verifies an UP ledger preserved across an update.
 
 6. Journal is secret-safe:
 
@@ -316,9 +305,7 @@ edits, no debounce/timer changes, no fake Telegram calls.
 
 The NORMAL flow of this section keeps the isolation active through the
 DOWN no-spam check (6.7); the isolation is removed only in section 7
-(recovery). The cleanup primitive appears in the normal flow THERE,
-and in the abort/rollback context of section 10 — nowhere between 6.1
-and 6.7.
+(recovery). Section 10 supplies the cleanup used for recovery, abort and rollback.
 
 ### 6.1 Define the probe target (accepted URL semantics, fail-closed)
 
@@ -331,32 +318,32 @@ never carries `:443`. Paste as ONE block; do not echo the resulting
 variables into evidence:
 
 ```bash
+set +x
 read -r SENTINEL_PROBE_URL SENTINEL_HOST SENTINEL_PORT < <(
     sudo /opt/hermes-sentinel/venv/bin/python - <<'PY'
 import sys
 from urllib.parse import urlsplit
 
-raw = None
+from hermes_sentinel.deadman_probe import DeadManProbeSettings
+
 with open("/etc/hermes-sentinel/deadman.env", encoding="utf-8") as fh:
-    for line in fh:
-        if line.startswith("HERMES_SENTINEL_DEADMAN_PROBE_URL="):
-            raw = line.split("=", 1)[1].strip()
-            break
-if not raw:
-    sys.exit("probe URL missing from deadman.env")
-parsed = urlsplit(raw)
-if parsed.scheme != "https":
-    sys.exit("probe URL is not HTTPS")
-host = parsed.hostname
-if not host:
-    sys.exit("probe URL has no hostname")
+    values = [
+        line.split("=", 1)[1].rstrip("\n")
+        for line in fh
+        if line.startswith("HERMES_SENTINEL_DEADMAN_PROBE_URL=")
+    ]
+if len(values) != 1:
+    sys.exit("expected one probe URL assignment in deadman.env")
+raw = values[0]
 try:
-    port = parsed.port
+    DeadManProbeSettings(url=raw)
+    parsed = urlsplit(raw)
+    port = 443 if parsed.port is None else parsed.port
+    if not 1 <= port <= 65535:
+        raise ValueError
 except ValueError:
-    sys.exit("probe URL has an invalid port")
-if port is None:
-    port = 443
-print(raw, host, port)
+    sys.exit("invalid probe URL in deadman.env")
+print(raw, parsed.hostname, port)
 PY
 ) || { echo "probe target extraction failed" >&2; exit 1; }
 test -n "${SENTINEL_PROBE_URL:-}" && test -n "${SENTINEL_HOST:-}" \
@@ -376,6 +363,11 @@ pre-existing filter chain and never iptables:
 
     table inet hermes_sentinel_h2
 
+Before isolation, keep a second authenticated operator session available
+with the cleanup in section 10 ready to run. Set a hard cleanup deadline
+and keep shell tracing disabled. On any failure or lost test session,
+run the cleanup in section 10 before retrying.
+
 Paste as ONE block. The FIRST statement validates the CURRENT shell
 value of `SENTINEL_PORT` with PYTHON integer semantics — non-empty,
 ASCII decimal digits only, `int()` parse, `1 <= port <= 65535` — which
@@ -385,7 +377,8 @@ digit-only string like `999999999999999999999999999999` terminates
 non-zero CLEANLY, with no Bash integer-expression error and no silent
 normalization or 443 fallback. Deliberately NO Bash `-lt`/`-gt`/`(( ))`
 arithmetic touches this untrusted shell text. The stale-table check
-follows; either failure TERMINATES the shell before ANY nft mutation
+is part of the atomic batch (`create table` requires absence); either
+failure terminates the shell without applying a partial ruleset
 (a malformed explicit URL port already failed closed in 6.1 — this
 re-validation is defense in depth for a lost/redefined variable). The
 exact variable validated here is the exact one interpolated into BOTH
@@ -400,6 +393,8 @@ import sys
 raw = sys.argv[1] if len(sys.argv) > 1 else ""
 if not raw or not raw.isascii() or not raw.isdigit():
     sys.exit(1)
+if len(raw) > 5:
+    sys.exit(1)
 port = int(raw)
 if not 1 <= port <= 65535:
     sys.exit(1)
@@ -408,28 +403,26 @@ then
     echo "SENTINEL_PORT failed validation (ASCII integer 1..65535 required)" >&2
     exit 1
 fi
-if sudo nft list table inet hermes_sentinel_h2 >/dev/null 2>&1; then
-    echo "stale H2 table already present - run the documented cleanup first" >&2
+if ! sudo nft -f - <<NFT
+create table inet hermes_sentinel_h2
+add chain inet hermes_sentinel_h2 output { type filter hook output priority 0; }
+add set inet hermes_sentinel_h2 sentinel_v4 { type ipv4_addr; }
+add set inet hermes_sentinel_h2 sentinel_v6 { type ipv6_addr; }
+add rule inet hermes_sentinel_h2 output ip daddr @sentinel_v4 tcp dport $SENTINEL_PORT reject
+add rule inet hermes_sentinel_h2 output ip6 daddr @sentinel_v6 tcp dport $SENTINEL_PORT reject
+NFT
+then
+    echo "H2 table creation failed or stale table present; run cleanup" >&2
     exit 1
 fi
-sudo nft add table inet hermes_sentinel_h2
-sudo nft add chain inet hermes_sentinel_h2 output \
-    '{ type filter hook output priority 0; }'
-sudo nft add set inet hermes_sentinel_h2 sentinel_v4 '{ type ipv4_addr; }'
-sudo nft add set inet hermes_sentinel_h2 sentinel_v6 '{ type ipv6_addr; }'
-sudo nft add rule inet hermes_sentinel_h2 output \
-    ip daddr @sentinel_v4 tcp dport "$SENTINEL_PORT" reject
-sudo nft add rule inet hermes_sentinel_h2 output \
-    ip6 daddr @sentinel_v6 tcp dport "$SENTINEL_PORT" reject
-echo "H2 isolation table created (both address sets present, both empty,"
-echo "probe port $SENTINEL_PORT blocked for both families)"
+echo "H2 isolation table created with both address sets empty"
 ```
 
 The rules block the ACTUAL configured probe path — the parsed
 `SENTINEL_PORT`, never a hard-coded 443: an implicit HTTPS port
 resolves to 443 in 6.1, while an endpoint such as
 `https://<sentinel-host>:8443/v1/heartbeat` produces `tcp dport 8443`.
-BOTH address sets and BOTH destination rules are created
+Both address sets and both destination rules are created
 UNCONDITIONALLY: an empty set is the correct representation of a
 family with no currently resolved addresses, and a family appearing
 later (DNS change) needs no structural change — the refresh helper
@@ -456,14 +449,14 @@ h2_refresh() {
     test -n "${SENTINEL_HOST:-}" \
         || { echo "SENTINEL_HOST undefined (run 6.1 first)" >&2; return 1; }
     batch="$(
-        sudo /opt/hermes-sentinel/venv/bin/python - "$SENTINEL_HOST" <<'PY'
+        sudo /opt/hermes-sentinel/venv/bin/python - "$SENTINEL_HOST" "$SENTINEL_PORT" <<'PY'
 import socket
 import sys
 
-host = sys.argv[1]
+host, port = sys.argv[1:]
 v4, v6 = set(), set()
 try:
-    for info in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
+    for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
         addr = info[4][0]
         (v4 if info[0] == socket.AF_INET else v6).add(addr)
 except socket.gaierror:
@@ -502,26 +495,41 @@ Run it IMMEDIATELY after creating the table, then record the blocked
 counts (counts only — never the address values) as evidence:
 
 ```bash
-h2_refresh || { echo "refresh failed - do not proceed" >&2; exit 1; }
-blocked_ipv4_count="$(
-    sudo nft list set inet hermes_sentinel_h2 sentinel_v4 \
-        | sed -n 's/.*elements = { \(.*\) }/\1/p' | wc -w)"
-blocked_ipv6_count="$(
-    sudo nft list set inet hermes_sentinel_h2 sentinel_v6 \
-        | sed -n 's/.*elements = { \(.*\) }/\1/p' | wc -w)"
-echo "blocked_ipv4_count=$blocked_ipv4_count"
-echo "blocked_ipv6_count=$blocked_ipv6_count"
-sudo nft list table inet hermes_sentinel_h2
+h2_refresh || { echo "refresh failed - run cleanup" >&2; exit 1; }
+if ! blocked_counts=$(
+    set -o pipefail
+    for family in v4 v6; do
+        sudo nft -j list set inet hermes_sentinel_h2 "sentinel_$family" |
+            /opt/hermes-sentinel/venv/bin/python -c '
+import json
+import sys
+
+family = sys.argv[1]
+ruleset = json.load(sys.stdin)["nftables"]
+[entry] = [
+    item["set"] for item in ruleset
+    if "set" in item and item["set"]["name"] == f"sentinel_{family}"
+]
+count = len(entry.get("elem", []))
+print(f"blocked_ip{family}_count={count}")
+' "$family" || exit 1
+    done
+); then
+    echo "H2 count failed - run cleanup" >&2
+    exit 1
+fi
+printf '%s\n' "$blocked_counts"
 ```
 
-Inspect the full listing locally and prove the complete resolved set
+Inspect the full table listing privately and prove the complete resolved set
 is represented (the set element counts must match the resolver's view —
 the values stay off the record).
 
 ### 6.4 Prove Telegram stays reachable while isolated
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://api.telegram.org/
+curl --disable --noproxy '*' --max-time 10 -sS -o /dev/null \
+    -w '%{http_code}\n' https://api.telegram.org/
 ```
 
 Any HTTP status code proves DNS + TCP + TLS + HTTP reachability. This
@@ -539,11 +547,26 @@ A. proof of a distinct completed timer activation of the oneshot:
    ```bash
    systemctl show hermes-sentinel-deadman.service \
        -p InvocationID -p ExecMainExitTimestamp \
-       -p ExecMainStatus -p ActiveEnterTimestamp
+       -p ExecMainStatus -p ActiveState -p Result
    ```
 
-   (a NEW `InvocationID` per activation; `ExecMainStatus=0` — a failed
-   probe is a normal observation, not a crash);
+   Require an inactive service with `Result=success` and
+   `ExecMainStatus=0` after the cycle. If the manager clears
+   `InvocationID` when the oneshot becomes inactive, read the journal
+   locally for the same window:
+
+   ```bash
+   sudo journalctl -u hermes-sentinel-deadman.service --since "$cycle_window_utc" \
+       --utc --output=json --output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID
+   ```
+
+   Set `cycle_window_utc=$(date -u '+%Y-%m-%d %H:%M:%S UTC')` before
+   the expected cycle. Use the invocation ID
+   and UTC timestamp of the corresponding `dead-man cycle completed`
+   message. Retain only the ID/time, exit status and the state summary.
+   Check that no other cycle intervened before the summary; if ambiguous,
+   abort and repeat the sequence from a healthy baseline.
+   [systemd journal fields](https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html)
 
 B. a state summary (section 4) taken AFTER that exact invocation.
 
@@ -605,16 +628,10 @@ isolation is removed.
 
 ## 7. Live RECOVERY acceptance
 
-1. Remove the ENTIRE isolation and prove absence — this is the ONE
-   authoritative cleanup primitive (deletion of the whole dedicated
-   table; never handle-based):
-
-   ```bash
-   sudo nft delete table inet hermes_sentinel_h2
-   sudo nft list table inet hermes_sentinel_h2 >/dev/null 2>&1 \
-       && { echo "H2 table STILL PRESENT" >&2; exit 1; } \
-       || echo "H2 isolation removed"
-   ```
+1. Remove the isolation with the cleanup command in section 10, step 1
+   only. Require successful proof of absence and keep the timer active for
+   recovery. If removal cannot be verified, abort the test and finish
+   cleanup before counting recovery.
 
 2. Prove the real Sentinel endpoint is reachable again AND healthy
    under the EXACT accepted public GET contract — HTTP status 405, an
@@ -634,7 +651,9 @@ isolation is removed.
 ```bash
 test -n "${SENTINEL_PROBE_URL:-}" \
     || { echo "SENTINEL_PROBE_URL undefined" >&2; exit 1; }
-sudo /opt/hermes-sentinel/venv/bin/python - "$SENTINEL_PROBE_URL" <<'PY'
+set +x
+set -o pipefail
+printf '%s\n' "$SENTINEL_PROBE_URL" | sudo /opt/hermes-sentinel/venv/bin/python -c '
 import sys
 
 from hermes_sentinel.deadman import DeadManProbeOutcome
@@ -644,14 +663,14 @@ from hermes_sentinel.deadman_probe import (
 )
 
 try:
-    settings = DeadManProbeSettings(url=sys.argv[1], timeout_seconds=10.0)
+    settings = DeadManProbeSettings(url=sys.stdin.readline().rstrip("\n"), timeout_seconds=10.0)
 except ValueError:
     sys.exit("SENTINEL_RECOVERY_PROBE=FAIL (invalid probe URL)")
 outcome = DeadManProber(settings).probe()
 if outcome is not DeadManProbeOutcome.HEALTHY:
     sys.exit("SENTINEL_RECOVERY_PROBE=FAIL")
 print("SENTINEL_RECOVERY_PROBE=PASS")
-PY
+' || { echo "H2 recovery verification failed" >&2; exit 1; }
 ```
 
    Required evidence: `SENTINEL_RECOVERY_PROBE=PASS` and exit 0.
@@ -685,15 +704,14 @@ Prove the persisted state survives process boundaries (no reboot
 required — each timer activation is already a fresh process):
 
 1. Capture the current state summary.
-2. Restart the oneshot/timer boundary and force one later cycle:
+2. Restart the timer and wait for a distinct timer-driven cycle (section 6.5):
 
    ```bash
    sudo systemctl restart hermes-sentinel-deadman.timer
-   sudo systemctl start hermes-sentinel-deadman.service
    ```
 
 3. Capture the state summary again: the state must remain UP with its
-   established anchor (`state_changed_at` unchanged in substance),
+   established anchor (`state_changed_at` equal to the previous summary),
    never reset to UNKNOWN merely because the process exited. A reset
    to UNKNOWN here is a defect — report it, do not patch the state
    file.
@@ -706,8 +724,9 @@ values, or raw env files — counts and statements replace values.
 
 **DEPLOYMENT**
 
-- deployed SHA: the verified `git rev-parse HEAD` output, which must
-  literally equal `37c2e1d6a4b484dcc29acc739ed16f44ed510b4e`;
+- deployed SHA: the verified source archive commit ID, which must
+  equal the release record's `APPROVED_SHA` used by central and reporters;
+- manifest and wheel digests and matching installed package and unit files;
 - `python3 --version` output;
 - console-script path verification (the `test -x` result for
   `/opt/hermes-sentinel/venv/bin/hermes-sentinel-deadman`);
@@ -727,8 +746,8 @@ values, or raw env files — counts and statements replace values.
 
 **DOWN**
 
-- the three distinct timer invocation ids/timestamps (InvocationID +
-  ExecMainExitTimestamp) — one per counted observation;
+- the three distinct timer invocation IDs and UTC timestamps from
+  section 6.5, one per counted observation;
 - the state summary after each of the three observations;
 - real DOWN Telegram receipt confirmation (message timestamp or
   screenshot with chat identity redacted);
@@ -767,13 +786,20 @@ to: an ABORTED DOWN test (immediately), operator retry preparation
 
 1. Remove the H2 isolation table if present, then prove absence:
 
+   <!-- h2-isolation-cleanup -->
    ```bash
-   if sudo nft list table inet hermes_sentinel_h2 >/dev/null 2>&1; then
-       sudo nft delete table inet hermes_sentinel_h2
-   fi
-   sudo nft list table inet hermes_sentinel_h2 >/dev/null 2>&1 \
-       && { echo "H2 table STILL PRESENT" >&2; exit 1; } \
-       || echo "H2 isolation removed"
+   (
+       tables=$(sudo nft list tables) || exit 1
+       if grep -Fxq 'table inet hermes_sentinel_h2' <<< "$tables"; then
+           sudo nft delete table inet hermes_sentinel_h2 || exit 1
+       fi
+       tables=$(sudo nft list tables) || exit 1
+       if grep -Fxq 'table inet hermes_sentinel_h2' <<< "$tables"; then
+           echo "H2 table still present" >&2
+           exit 1
+       fi
+       echo "H2 isolation removed"
+   ) || { echo "H2 cleanup could not be verified" >&2; exit 1; }
    ```
 
 2. Stop and disable the timer:

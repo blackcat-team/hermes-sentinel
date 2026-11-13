@@ -161,6 +161,7 @@ under the target Ubuntu service manager during rollout.
 
 ## F3. Operator acceptance
 
+For v1.0 follow the [consolidated release procedure](H_FINAL_ACCEPTANCE.md).
 Use one approved candidate SHA throughout. Keep MVP runtime and Stage F
 acceptance open until each has its own complete observations and independent
 review. Schedule a bounded window and designate a controlled reporter node,
@@ -171,10 +172,11 @@ and the point at which to restore the previous approved release.
 ### Preflight and installation
 
 Confirm successful GitHub Actions `CI` job `verify` for the exact candidate
-and retain the run ID and URL. Use a clean local checkout from the trusted
-source on each installation host. Set `APPROVED_SHA` to the full reviewed
-commit ID supplied by the operator. Run this preflight before building or
-copying installation files.
+and retain the run ID and URL. Use a clean trusted checkout to build the
+release artifacts. Set `APPROVED_SHA` to the full reviewed commit ID
+supplied by the operator and run this preflight before building. Verify
+the release archive and manifest on each installation host as described
+in the consolidated procedure.
 
 <!-- stage-f-sha-preflight -->
 ```bash

@@ -63,7 +63,9 @@ the reporter belongs under `/home`, `/root` or `/tmp`.
 
 ## Installation
 
-From a local checkout of this repository on the monitored host:
+From the verified source directory on the monitored host, as prepared in the
+[consolidated release procedure](H_FINAL_ACCEPTANCE.md#verify-on-each-installation-host).
+On updates, preserve the existing root-only environment file.
 
 ```bash
 # Reporter executable (root-owned, world-executable, not writable).
@@ -76,9 +78,11 @@ sudo install -o root -g root -m 0755 \
 # synthetic example. 0600 root:root: only root and the systemd
 # manager reading it at service start ever see the contents.
 sudo install -d -o root -g root -m 0750 /etc/hermes-sentinel
-sudo install -o root -g root -m 0600 \
-    packaging/systemd/reporter.env.example \
-    /etc/hermes-sentinel/reporter.env
+if ! sudo test -e /etc/hermes-sentinel/reporter.env; then
+    sudo install -o root -g root -m 0600 \
+        packaging/systemd/reporter.env.example \
+        /etc/hermes-sentinel/reporter.env
+fi
 
 # systemd units.
 sudo install -o root -g root -m 0644 \
@@ -205,7 +209,8 @@ never performs deployment.
 
 ## Stage F acceptance and token rotation
 
-Use the exact [Stage F candidate and HTTPS profile](PRODUCTION_HARDENING.md).
+Use the approved release SHA and the
+[Stage F HTTPS profile](PRODUCTION_HARDENING.md).
 Before enabling the timer, confirm the installed script and units match
 that SHA, the dedicated identity owns no executable or environment file,
 and the environment file is root:root 0600. Run the single oneshot and

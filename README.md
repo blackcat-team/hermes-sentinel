@@ -10,9 +10,11 @@ or modifies monitored hosts.
 
 ## Status
 
-Initial development — Stage E (incidents + Telegram) on top of the
-Stage D health engine, the Stage C host reporter and the Stage B
-heartbeat pipeline.
+The v1.0 candidate contains the central monitoring runtime, HTTPS ingress,
+the host reporter and the independent dead-man. Use the
+[consolidated deployment and H-FINAL acceptance procedure](docs/H_FINAL_ACCEPTANCE.md)
+for the live window. MVP runtime, Stage F, H2 and H-FINAL require live evidence
+and Architect acceptance.
 
 Stage C is CLOSED in repository: the Stage C1 Linux telemetry
 collector, the Stage C2 HTTPS one-shot transport and the Stage C3
@@ -206,7 +208,7 @@ the only place production code implicitly reads the process
 environment. This is a process boundary, not a production
 deployment claim.
 
-Stage E9 is the current stage: the minimal declarative Ubuntu/systemd
+Stage E9 added the minimal declarative Ubuntu/systemd
 packaging and operator deployment runbook for that accepted central
 process. `packaging/systemd/hermes-sentinel.service` launches exactly
 the E8 entrypoint (`/opt/hermes-sentinel/venv/bin/hermes-sentinel`)
@@ -220,19 +222,10 @@ non-invasive isolation and `Restart=on-failure` systemd process
 supervision only — a normal operator stop through SIGTERM is handled
 cooperatively by E8 and deliberately not restarted. The operator
 runbook is [docs/SENTINEL_DEPLOYMENT.md](docs/SENTINEL_DEPLOYMENT.md).
-Packaging is declarative: this repository state is packaging only,
-not a deployed or production-verified installation, and E9 makes no
-claim of production deployment or live acceptance (the B5 backend
-remains plaintext — TLS termination/reverse proxy stays Stage F).
-Stage E is not complete and the MVP is not complete: Stage E still
-requires the final runtime/MVP acceptance after E9, and Stage F
-hardening remains outstanding.
-
-Stage B5 is a plaintext backend listener
-(`http.server.HTTPServer` + `BaseHTTPRequestHandler`, stdlib raw
-HTTP parsing only). It is not a production Internet-facing
-endpoint: production reporters use outbound HTTPS; TLS termination
-belongs to later hardening.
+Stage F supplies the [HTTPS ingress and service confinement](docs/PRODUCTION_HARDENING.md).
+B5 is the loopback plaintext backend. The [H2 runbook](docs/DEADMAN_DEPLOYMENT.md)
+covers the independent host and follows accepted central service operation
+during the same live window.
 
 - Architecture contracts (product, security, host state semantics,
   persistence, roadmap): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)

@@ -89,8 +89,9 @@ already-accepted reporter paths.
 
 ## Installation
 
-In this safe order, from the local trusted copy of the accepted
-repository state:
+For v1.0, use the verified source directory and wheel from the
+[consolidated release procedure](H_FINAL_ACCEPTANCE.md).
+Install in this order:
 
 1. Create/verify the dedicated service identity (above).
 2. Create the application root with root ownership:
@@ -110,14 +111,12 @@ repository state:
    `/opt/hermes-sentinel/venv/bin/hermes-sentinel` exists:
 
    ```bash
-   sudo /opt/hermes-sentinel/venv/bin/pip install \
-       <local-path-to-accepted-artifact>
+   sudo /opt/hermes-sentinel/venv/bin/pip install --no-index --no-deps \
+       --force-reinstall "${RELEASE_WHEEL:?}"
    ```
 
-   `<local-path-to-accepted-artifact>` is the operator's local sdist,
-   wheel or repository checkout already on the host. This runbook
-   performs no git pull and no download from the Internet — which exact
-   accepted state is installed is the operator's decision.
+   Use `RELEASE_WHEEL` from the consolidated release verification. Record
+   its digest and compare the installed package against the verified source.
 
    Verify the entrypoint exists:
 
@@ -131,13 +130,16 @@ repository state:
    sudo install -d -o root -g root -m 0750 /etc/hermes-sentinel
    ```
 
-6. Install the safe synthetic example as the central environment file,
-   root:root 0600:
+6. On first installation, provision the central environment from the
+   synthetic example. On update, preserve the protected environment file
+   and edit the approved values in the next step:
 
    ```bash
-   sudo install -o root -g root -m 0600 \
-       packaging/systemd/sentinel.env.example \
-       /etc/hermes-sentinel/sentinel.env
+   if ! sudo test -e /etc/hermes-sentinel/sentinel.env; then
+       sudo install -o root -g root -m 0600 \
+           packaging/systemd/sentinel.env.example \
+           /etc/hermes-sentinel/sentinel.env
+   fi
    ```
 
 7. Edit the installed copy locally (next section) — never pass secrets

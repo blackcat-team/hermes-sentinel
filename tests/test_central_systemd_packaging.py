@@ -539,11 +539,13 @@ class ReadmeStatusTest(unittest.TestCase):
             self.assertNotIn(claim, self.text,
                              msg=f"README must not claim {claim}")
 
-    def test_stage_e_acceptance_and_stage_f_outstanding(self) -> None:
-        self.assertRegex(self.text, r"(?i)final\s+runtime/MVP\s+acceptance")
-        self.assertRegex(self.text,
-                         r"(?i)Stage\s+F\s+hardening\s+remains\s+outstanding")
-        self.assertRegex(self.text, r"(?i)Stage\s+E\s+is\s+not\s+complete")
+    def test_release_procedure_and_pending_live_acceptance(self) -> None:
+        self.assertIn("docs/H_FINAL_ACCEPTANCE.md", self.text)
+        self.assertRegex(
+            self.text,
+            r"MVP runtime, Stage F, H2 and H-FINAL require live evidence\s+"
+            r"and Architect acceptance",
+        )
 
 
 if __name__ == "__main__":

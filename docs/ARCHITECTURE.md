@@ -2251,6 +2251,15 @@ Current stage status:
   accepted by the Architect. H2, H-FINAL and Stage H are NOT marked
   complete by this document.
 
+## 35. H-FINAL release acceptance
+
+[The consolidated procedure](H_FINAL_ACCEPTANCE.md) binds the central
+runtime, ingress, reporter and external dead-man to the same reviewed
+release SHA. The Architect records central MVP and Stage F acceptance
+before dead-man activation. H-FINAL requires reviewed live H2 evidence
+for that SHA, verified rollback and cleanup, and final Architect sign-off.
+The release procedure defines the evidence record and completion criteria.
+
 Tracked documentation must never contain real production hostnames,
 IPs, domains, external-host identities, Telegram ids/tokens or
 account identifiers — synthetic placeholders only.
